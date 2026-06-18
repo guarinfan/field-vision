@@ -1,0 +1,7 @@
+modal>=0.64.0
+ultralytics==8.3.0
+opencv-python-headless==4.10.0.84
+boto3==1.35.0
+numpy==1.26.4
+scipy==1.14.0
+requests==2.32.3

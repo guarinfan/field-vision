@@ -7,12 +7,17 @@ export default function Home() {
       {/* Nav */}
       <nav className="flex items-center justify-between px-6 py-4 border-b border-green-900/40">
         <span className="text-xl font-bold tracking-tight text-green-400">FieldVision</span>
-        <Link
-          href="/session/new"
-          className="bg-green-500 hover:bg-green-400 text-black font-semibold text-sm px-4 py-2 rounded-lg transition-colors"
-        >
-          Start Recording
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link href="/sessions" className="text-sm text-green-400 hover:text-green-300 font-medium transition-colors">
+            My Sessions
+          </Link>
+          <Link
+            href="/session/new"
+            className="bg-green-500 hover:bg-green-400 text-black font-semibold text-sm px-4 py-2 rounded-lg transition-colors"
+          >
+            Start Recording
+          </Link>
+        </div>
       </nav>
 
       {/* Hero */}

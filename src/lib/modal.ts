@@ -1,11 +1,11 @@
 export async function triggerProcessingJob(sessionId: string): Promise<{ jobId: string }> {
-  const res = await fetch(`${process.env.MODAL_WEBHOOK_URL}/process`, {
+  const res = await fetch(`${process.env.MODAL_WEBHOOK_URL}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.MODAL_AUTH_TOKEN}`,
-    },
-    body: JSON.stringify({ session_id: sessionId }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      _auth: process.env.MODAL_AUTH_TOKEN,
+    }),
   });
 
   if (!res.ok) {
