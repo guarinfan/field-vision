@@ -1,0 +1,23 @@
+import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabase";
+import { getUploadUrl, videoKey } from "@/lib/r2";
+
+export async function POST(req: NextRequest) {
+  const { session_id, camera } = await req.json();
+
+  if (!session_id || (camera !== "left" && camera !== "right")) {
+    return NextResponse.json({ error: "Invalid params" }, { status: 400 });
+  }
+
+  const key = videoKey(session_id, camera);
+  const url = await getUploadUrl(key, "video/mp4");
+
+  // Track which video key belongs to this camera
+  const field = camera === "left" ? "left_video_key" : "right_video_key";
+  await supabaseAdmin
+    .from("sessions")
+    .update({ [field]: key, status: "uploading" })
+    .eq("id", session_id);
+
+  return NextResponse.json({ url, key });
+}
