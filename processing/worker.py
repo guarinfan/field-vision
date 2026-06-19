@@ -154,6 +154,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
     H_matrix = None
     overlap_px = int(w * 0.20)  # default overlap assumption
+    out_w = w + (w - overlap_px)
+    out_h = h
 
     for sample_pos in [0.3, 0.5, 0.7]:
         frame_idx = int(total * sample_pos)
@@ -165,16 +167,22 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
             continue
         result = _compute_homography(fl, fr)
         if result is not None:
-            H_matrix, overlap_px = result
-            break
+            H_candidate, overlap_candidate = result
+            # Sanity check: warp the four corners of right frame and verify
+            # they land within a reasonable distance of the canvas
+            corners = np.float32([[0,0],[w,0],[w,h],[0,h]]).reshape(-1,1,2)
+            warped_corners = cv2.perspectiveTransform(corners, H_candidate)
+            xs = warped_corners[:,:,0].flatten()
+            ys = warped_corners[:,:,1].flatten()
+            # Reject if warped corners are wildly outside the canvas
+            if xs.min() > -w and xs.max() < out_w + w and ys.min() > -h and ys.max() < out_h + h:
+                H_matrix = H_candidate
+                overlap_px = overlap_candidate
+                break
 
     # Reset to start
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    # Canvas width: left full width + right non-overlapping portion
-    out_w = w + (w - overlap_px)
-    out_h = h
 
     # Build gradient blend mask for the seam (overlap region)
     blend_mask = np.zeros((h, out_w), dtype=np.float32)
