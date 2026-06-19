@@ -35,6 +35,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install(
+        "fastapi[standard]",
         "ultralytics==8.3.0",
         "opencv-python-headless==4.10.0.84",
         "boto3==1.35.0",
@@ -333,10 +334,10 @@ def process_session(session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 @app.function(image=image, secrets=secrets)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def process(body: dict) -> dict:
     import os
-    auth = body.get("_auth", "")  # auth token passed in body by Vercel
+    auth = body.get("_auth", "")
     if auth != os.environ.get("MODAL_AUTH_TOKEN", ""):
         return {"error": "Unauthorized"}
 
@@ -344,6 +345,5 @@ def process(body: dict) -> dict:
     if not session_id:
         return {"error": "Missing session_id"}
 
-    # Spawn async job
     process_session.spawn(session_id)
     return {"jobId": f"modal-{session_id}", "ok": True}

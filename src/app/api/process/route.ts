@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { triggerProcessingJob } from "@/lib/modal";
+import type { Session } from "@/types/database";
 
 export async function POST(req: NextRequest) {
   const { session_id } = await req.json();
@@ -11,7 +12,7 @@ export async function POST(req: NextRequest) {
 
   const { data, error } = await supabaseAdmin
     .from("sessions")
-    .select("left_video_key, right_video_key")
+    .select("*")
     .eq("id", session_id)
     .single();
 
@@ -19,7 +20,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 
-  if (!data.left_video_key || !data.right_video_key) {
+  const session = data as unknown as Session;
+
+  if (!session.left_video_key || !session.right_video_key) {
     return NextResponse.json({ error: "Both videos must be uploaded first" }, { status: 400 });
   }
 

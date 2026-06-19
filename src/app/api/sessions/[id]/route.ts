@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 import { getDownloadUrl } from "@/lib/r2";
+import type { Session } from "@/types/database";
 
 export async function GET(
   _req: NextRequest,
@@ -18,23 +19,24 @@ export async function GET(
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 
-  // Attach signed download URLs for any output keys
+  const session = data as unknown as Session;
   const urls: Record<string, string> = {};
-  if (data.stitched_video_key) {
-    urls.stitched_video = await getDownloadUrl(data.stitched_video_key);
+
+  if (session.stitched_video_key) {
+    urls.stitched_video = await getDownloadUrl(session.stitched_video_key);
   }
-  if (data.tracked_video_key) {
-    urls.tracked_video = await getDownloadUrl(data.tracked_video_key);
+  if (session.tracked_video_key) {
+    urls.tracked_video = await getDownloadUrl(session.tracked_video_key);
   }
-  if (data.highlights) {
+  if (session.highlights) {
     const highlights = await Promise.all(
-      data.highlights.map(async (h) => ({
+      session.highlights.map(async (h) => ({
         ...h,
         clip_url: await getDownloadUrl(h.clip_key),
       }))
     );
-    return NextResponse.json({ ...data, urls, highlights });
+    return NextResponse.json({ ...session, urls, highlights });
   }
 
-  return NextResponse.json({ ...data, urls });
+  return NextResponse.json({ ...session, urls });
 }

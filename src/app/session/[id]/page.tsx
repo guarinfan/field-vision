@@ -7,12 +7,12 @@ import { supabase } from "@/lib/supabase";
 import type { Session, Highlight } from "@/types/database";
 import { cn } from "@/lib/cn";
 
-interface SessionWithUrls extends Session {
+interface SessionWithUrls extends Omit<Session, "highlights"> {
   urls?: {
     stitched_video?: string;
     tracked_video?: string;
   };
-  highlights?: (Highlight & { clip_url?: string })[];
+  highlights?: (Highlight & { clip_url?: string })[] | null;
 }
 
 const STATUS_STEPS = ["created", "uploading", "processing", "done"] as const;
