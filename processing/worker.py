@@ -90,24 +90,150 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
+def _compute_homography(left_frame, right_frame):
+    """
+    Detect ORB features in the overlapping region of both frames and compute
+    the homography that warps the right frame to align with the left frame.
+    Returns homography matrix or None if not enough matches.
+    """
+    import cv2
+    import numpy as np
+
+    h, w = left_frame.shape[:2]
+
+    # Only look for features in the right 30% of left frame and left 30% of right frame
+    overlap = int(w * 0.30)
+    left_roi  = left_frame[:, w - overlap:]
+    right_roi = right_frame[:, :overlap]
+
+    orb = cv2.ORB_create(2000)
+    kp1, des1 = orb.detectAndCompute(cv2.cvtColor(left_roi,  cv2.COLOR_BGR2GRAY), None)
+    kp2, des2 = orb.detectAndCompute(cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY), None)
+
+    if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+        return None
+
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    matches = bf.knnMatch(des1, des2, k=2)
+
+    good = [m for m, n in matches if m.distance < 0.75 * n.distance]
+    if len(good) < 8:
+        return None
+
+    # Shift keypoint coordinates back to full-frame space
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
+    pts1[:, 0] += w - overlap  # shift x back into full left frame
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
+    # pts2 are already in right-frame local coords (no shift needed for warp source)
+
+    H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
+    if H is None or mask.sum() < 6:
+        return None
+
+    return H, overlap
+
+
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Simple side-by-side stitch with ffmpeg hstack.
-    For production, replace with homography-based panoramic stitch using OpenCV
-    findHomography + warpPerspective on the overlapping region.
+    Panoramic stitch:
+      1. Sample frames to compute homography for the overlapping center region.
+      2. Warp right video onto left canvas with gradient seam blend.
+      3. Falls back to gradient hstack if feature matching fails (e.g. low texture).
     """
+    import cv2
+    import numpy as np
+
+    cap_l = cv2.VideoCapture(str(left_path))
+    cap_r = cv2.VideoCapture(str(right_path))
+
+    fps   = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
+    w     = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h     = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # -- Sample a few mid-video frames to compute a stable homography
+    total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
+    H_matrix = None
+    overlap_px = int(w * 0.20)  # default overlap assumption
+
+    for sample_pos in [0.3, 0.5, 0.7]:
+        frame_idx = int(total * sample_pos)
+        cap_l.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        cap_r.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret_l, fl = cap_l.read()
+        ret_r, fr = cap_r.read()
+        if not ret_l or not ret_r:
+            continue
+        result = _compute_homography(fl, fr)
+        if result is not None:
+            H_matrix, overlap_px = result
+            break
+
+    # Reset to start
+    cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Canvas width: left full width + right non-overlapping portion
+    out_w = w + (w - overlap_px)
+    out_h = h
+
+    # Build gradient blend mask for the seam (overlap region)
+    blend_mask = np.zeros((h, out_w), dtype=np.float32)
+    for x in range(overlap_px):
+        alpha = 1.0 - (x / overlap_px)  # 1.0 at left edge of overlap, 0.0 at right
+        blend_mask[:, w - overlap_px + x] = alpha
+
+    tmp_out = out_path.with_suffix(".raw.mp4")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(tmp_out), fourcc, fps, (out_w, out_h))
+
+    while True:
+        ret_l, frame_l = cap_l.read()
+        ret_r, frame_r = cap_r.read()
+        if not ret_l or not ret_r:
+            break
+
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+        if H_matrix is not None:
+            # Warp right frame onto canvas using homography
+            warped_r = cv2.warpPerspective(frame_r, H_matrix, (out_w, out_h))
+            canvas = warped_r.copy()
+            # Blend left frame over the canvas with gradient at seam
+            for c in range(3):
+                canvas[:, :w, c] = (
+                    frame_l[:, :w, c].astype(np.float32) * (1 - blend_mask[:, :w]) +
+                    canvas[:, :w, c].astype(np.float32) * blend_mask[:, :w]
+                ).astype(np.uint8)
+            canvas[:, :w - overlap_px] = frame_l[:, :w - overlap_px]
+        else:
+            # Fallback: gradient blend at center seam, no warp
+            canvas[:, :w] = frame_l
+            canvas[:, w - overlap_px:] = frame_r[:, :w + overlap_px] if frame_r.shape[1] >= w + overlap_px else np.pad(frame_r, ((0,0),(0, overlap_px),( 0,0)), mode='edge')[:, :w + overlap_px]
+            for c in range(3):
+                seam_l = frame_l[:, w - overlap_px:w, c].astype(np.float32)
+                seam_r = frame_r[:, :overlap_px, c].astype(np.float32)
+                alpha  = np.linspace(1, 0, overlap_px)[np.newaxis, :]
+                blended = (seam_l * alpha + seam_r * (1 - alpha)).astype(np.uint8)
+                canvas[:, w - overlap_px:w, c] = blended
+
+        writer.write(canvas)
+
+    cap_l.release()
+    cap_r.release()
+    writer.release()
+
+    # Re-mux with audio from left camera
     cmd = [
         "ffmpeg", "-y",
+        "-i", str(tmp_out),
         "-i", str(left_path),
-        "-i", str(right_path),
-        "-filter_complex",
-        # Scale both to 1280x720, stack horizontally
-        "[0:v]scale=1280:720[l];[1:v]scale=1280:720[r];[l][r]hstack=inputs=2",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-c:a", "aac",
         str(out_path),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
+    tmp_out.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
