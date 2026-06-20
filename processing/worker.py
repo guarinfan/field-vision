@@ -129,7 +129,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     left_keep  = W - int(W * LEFT_CROP)   # columns kept from left frame
     right_skip = int(W * RIGHT_CROP)       # columns skipped from right frame
     right_keep = W - right_skip            # columns kept from right frame
-    out_w      = left_keep + right_keep
+    # The feather zone is shared — don't double-count those pixels
+    out_w      = left_keep + right_keep - FEATHER
     out_h      = H
 
     # --- Colour calibration: affine match right→left per channel ---
@@ -196,16 +197,16 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         ).astype(np.uint8)
 
         canvas = np.empty((out_h, out_w, 3), dtype=np.uint8)
-        # Solid left portion
-        canvas[:, :left_keep - FEATHER] = fl[:, :left_keep - FEATHER]
-        # Solid right portion
+        seam = left_keep - FEATHER  # start of feather zone in canvas
+        # Solid left portion (before feather)
+        canvas[:, :seam] = fl[:, :seam]
+        # Solid right portion (after feather)
         canvas[:, left_keep:] = fr_f[:, right_skip + FEATHER:]
-        # Feathered seam zone (FEATHER pixels wide)
-        f = FEATHER
-        lz = fl[:,  left_keep  - f : left_keep,       :].astype(np.float32)
-        rz = fr_f[:, right_skip    : right_skip + f,  :].astype(np.float32)
+        # Feathered seam zone: canvas cols seam → left_keep
+        lz = fl[:,  seam : left_keep,              :].astype(np.float32)
+        rz = fr_f[:, right_skip : right_skip + FEATHER, :].astype(np.float32)
         a  = feather_alpha[:, :, np.newaxis]
-        canvas[:, left_keep - f : left_keep, :] = (lz * a + rz * (1 - a)).astype(np.uint8)
+        canvas[:, seam : left_keep, :] = (lz * a + rz * (1 - a)).astype(np.uint8)
 
         enc.stdin.write(canvas.tobytes())
         frame_idx += 1
