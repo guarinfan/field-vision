@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, Suspense } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Loader2, Camera, Upload, CheckCircle2, Wifi, WifiOff } from "lucide-react";
+import { Loader2, Upload, CheckCircle2, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 type Side = "left" | "right";
@@ -24,6 +24,14 @@ const STATUS_LABEL: Record<PhoneStatus, string> = {
 };
 
 export default function RecordPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black flex items-center justify-center"><Loader2 className="text-green-400 animate-spin" size={32} /></div>}>
+      <RecordPageInner />
+    </Suspense>
+  );
+}
+
+function RecordPageInner() {
   const { id } = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const side = (searchParams.get("side") ?? "left") as Side;
@@ -220,7 +228,7 @@ export default function RecordPage() {
   return (
     <div className="min-h-screen bg-black flex flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-safe pt-4 pb-2">
+      <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <div>
           <p className="text-xs text-gray-500 uppercase tracking-widest">FieldVision</p>
           <h1 className="text-white font-bold text-lg capitalize">{side} Camera</h1>
@@ -296,7 +304,7 @@ export default function RecordPage() {
       </div>
 
       {/* Controls */}
-      <div className="px-6 pb-safe pb-8 pt-4 bg-black">
+      <div className="px-6 pb-8 pt-4 bg-black">
         {status === "connecting" && (
           <div className="flex items-center justify-center gap-2 text-gray-400">
             <Loader2 size={18} className="animate-spin" />
