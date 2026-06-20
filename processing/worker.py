@@ -146,9 +146,19 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     cap_l = cv2.VideoCapture(str(left_path))
     cap_r = cv2.VideoCapture(str(right_path))
 
-    fps   = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
-    w     = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h     = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
+
+    # Normalize both videos to the same resolution (use left as reference)
+    w = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    def read_resized(cap):
+        ret, frame = cap.read()
+        if not ret:
+            return False, None
+        if frame.shape[1] != w or frame.shape[0] != h:
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
+        return True, frame
 
     # -- Sample a few mid-video frames to compute a stable homography
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -161,8 +171,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         frame_idx = int(total * sample_pos)
         cap_l.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         cap_r.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret_l, fl = cap_l.read()
-        ret_r, fr = cap_r.read()
+        ret_l, fl = read_resized(cap_l)
+        ret_r, fr = read_resized(cap_r)
         if not ret_l or not ret_r:
             continue
         result = _compute_homography(fl, fr)
@@ -195,8 +205,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     writer = cv2.VideoWriter(str(tmp_out), fourcc, fps, (out_w, out_h))
 
     while True:
-        ret_l, frame_l = cap_l.read()
-        ret_r, frame_r = cap_r.read()
+        ret_l, frame_l = read_resized(cap_l)
+        ret_r, frame_r = read_resized(cap_r)
         if not ret_l or not ret_r:
             break
 
