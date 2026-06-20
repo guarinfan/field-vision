@@ -2,7 +2,7 @@
 
 import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Camera, Upload, ChevronRight, CheckCircle2, Loader2 } from "lucide-react";
+import { Camera, Upload, ChevronRight, CheckCircle2, Loader2, Smartphone } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 type UploadState = "idle" | "uploading" | "done" | "error";
@@ -100,6 +100,18 @@ export default function NewSessionPage() {
 
   const bothUploaded = left.state === "done" && right.state === "done";
 
+  async function createAndRecord(side: "left" | "right") {
+    setError(null);
+    const res = await fetch("/api/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ team_name: teamName, match_date: matchDate }),
+    });
+    if (!res.ok) { setError("Failed to create session"); return; }
+    const { id } = await res.json();
+    router.push(`/session/${id}/record?side=${side}`);
+  }
+
   return (
     <div className="min-h-screen px-4 py-12 flex flex-col items-center">
       <div className="w-full max-w-lg">
@@ -107,7 +119,7 @@ export default function NewSessionPage() {
         <div className="mb-8">
           <a href="/" className="text-green-500 text-sm font-medium hover:text-green-400 mb-4 inline-block">&larr; FieldVision</a>
           <h1 className="text-3xl font-bold">New Match Session</h1>
-          <p className="text-green-200/50 text-sm mt-1">Upload footage from two phones to create a panoramic view.</p>
+          <p className="text-green-200/50 text-sm mt-1">Record live from two phones or upload existing footage.</p>
         </div>
 
         {/* Step indicator */}
@@ -151,11 +163,48 @@ export default function NewSessionPage() {
               />
             </div>
             {error && <p className="text-red-400 text-sm">{error}</p>}
+
+            {/* Record from phones */}
+            <div className="border border-green-800/50 rounded-xl p-4 mt-2">
+              <div className="flex items-center gap-2 mb-3">
+                <Smartphone size={16} className="text-green-400" />
+                <p className="text-sm font-semibold text-green-300">Record from this phone</p>
+              </div>
+              <p className="text-xs text-green-700 mb-4">You'll record one half. A QR code will appear for the second phone to scan and record the other half.</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => createAndRecord("left")}
+                  disabled={!teamName}
+                  className="flex flex-col items-center gap-2 bg-green-950/50 border border-green-800/50 hover:border-green-500/60 disabled:opacity-40 rounded-xl p-4 transition-colors"
+                >
+                  <span className="text-2xl">⬅️</span>
+                  <span className="text-sm font-semibold text-green-200">I'm Left Camera</span>
+                  <span className="text-xs text-green-700">Covers left half</span>
+                </button>
+                <button
+                  onClick={() => createAndRecord("right")}
+                  disabled={!teamName}
+                  className="flex flex-col items-center gap-2 bg-green-950/50 border border-green-800/50 hover:border-green-500/60 disabled:opacity-40 rounded-xl p-4 transition-colors"
+                >
+                  <span className="text-2xl">➡️</span>
+                  <span className="text-sm font-semibold text-green-200">I'm Right Camera</span>
+                  <span className="text-xs text-green-700">Covers right half</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 my-1">
+              <div className="flex-1 h-px bg-green-900/40" />
+              <span className="text-xs text-green-800">or upload existing footage</span>
+              <div className="flex-1 h-px bg-green-900/40" />
+            </div>
+
             <button
               onClick={createSession}
-              className="flex items-center justify-center gap-2 bg-green-500 hover:bg-green-400 text-black font-bold px-6 py-3 rounded-xl transition-colors mt-2"
+              className="flex items-center justify-center gap-2 bg-green-950/50 border border-green-800/50 hover:border-green-500/50 text-green-300 font-semibold px-6 py-3 rounded-xl transition-colors"
             >
-              Continue <ChevronRight size={16} />
+              <Upload size={16} /> Upload video files <ChevronRight size={16} />
             </button>
           </div>
         )}

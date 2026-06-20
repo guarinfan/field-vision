@@ -5,6 +5,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { Loader2, Upload, CheckCircle2, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { QRCodeSVG } from "qrcode.react";
 
 type Side = "left" | "right";
 type PhoneStatus = "connecting" | "ready" | "recording" | "uploading" | "done" | "error";
@@ -22,6 +23,26 @@ const STATUS_LABEL: Record<PhoneStatus, string> = {
   done: "Done",
   error: "Error",
 };
+
+function PeerQRCode({ sessionId, otherSide }: { sessionId: string; otherSide: Side }) {
+  const [origin, setOrigin] = useState("");
+  useEffect(() => { setOrigin(window.location.origin); }, []);
+  if (!origin) return null;
+  const url = `${origin}/session/${sessionId}/record?side=${otherSide}`;
+  return (
+    <div className="flex flex-col items-center gap-3 py-2">
+      <p className="text-gray-400 text-sm text-center">
+        Have the <span className="text-white font-semibold capitalize">{otherSide} camera</span> phone scan this:
+      </p>
+      <div className="bg-white p-4 rounded-2xl">
+        <QRCodeSVG value={url} size={200} bgColor="#ffffff" fgColor="#000000" />
+      </div>
+      <p className="text-gray-600 text-xs text-center">
+        They'll automatically join as the {otherSide} camera
+      </p>
+    </div>
+  );
+}
 
 export default function RecordPage() {
   return (
@@ -219,7 +240,8 @@ function RecordPageInner() {
     if (action === "stop") stopRecording();
   };
 
-  const bothReady = status === "ready" && peer?.status === "ready";
+  const peerConnected = peer !== null;
+  const bothReady = status === "ready" && peerConnected;
   const isRecording = status === "recording";
 
   const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
@@ -312,9 +334,7 @@ function RecordPageInner() {
         )}
 
         {status === "ready" && !bothReady && (
-          <div className="text-center text-gray-400 text-sm">
-            Waiting for {otherSide} camera to connect…
-          </div>
+          <PeerQRCode sessionId={id} otherSide={otherSide} />
         )}
 
         {bothReady && (
