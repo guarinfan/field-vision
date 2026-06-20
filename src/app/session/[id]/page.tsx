@@ -42,6 +42,14 @@ export default function SessionPage() {
     fetchSession();
   }, [fetchSession]);
 
+  // Poll every 4 seconds while processing — fallback if Realtime doesn't fire
+  useEffect(() => {
+    if (!session) return;
+    if (session.status === "done" || session.status === "error") return;
+    const interval = setInterval(fetchSession, 4000);
+    return () => clearInterval(interval);
+  }, [session?.status, fetchSession]);
+
   // Realtime subscription for live status updates
   useEffect(() => {
     const channel = supabase
