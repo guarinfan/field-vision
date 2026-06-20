@@ -183,7 +183,7 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     frame_idx = 0
-    total_f   = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
+    pipe_broken = False
     while True:
         fl = read_frame(cap_l)
         fr = read_frame(cap_r)
@@ -199,26 +199,30 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
         canvas = np.empty((out_h, out_w, 3), dtype=np.uint8)
         seam = left_keep - FEATHER  # start of feather zone in canvas
-        # Solid left portion (before feather)
         canvas[:, :seam] = fl[:, :seam]
-        # Solid right portion (after feather)
         canvas[:, left_keep:] = fr_f[:, right_skip + FEATHER:]
-        # Feathered seam zone: canvas cols seam → left_keep
         lz = fl[:,  seam : left_keep,              :].astype(np.float32)
         rz = fr_f[:, right_skip : right_skip + FEATHER, :].astype(np.float32)
         a  = feather_alpha[:, :, np.newaxis]
         canvas[:, seam : left_keep, :] = (lz * a + rz * (1 - a)).astype(np.uint8)
 
-        enc.stdin.write(canvas.tobytes())
+        try:
+            enc.stdin.write(canvas.tobytes())
+        except (BrokenPipeError, OSError):
+            pipe_broken = True
+            break
         frame_idx += 1
 
     cap_l.release()
     cap_r.release()
-    enc.stdin.close()
+    try:
+        enc.stdin.close()
+    except OSError:
+        pass
     _, stderr_bytes = enc.communicate()
-    if enc.returncode != 0:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
-        raise RuntimeError(f"FFmpeg stitch encode failed (rc={enc.returncode}):\n{stderr_text}")
+    if enc.returncode != 0 or pipe_broken:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-3000:]
+        raise RuntimeError(f"FFmpeg stitch failed after {frame_idx} frames (rc={enc.returncode}):\n{stderr_text}")
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +394,11 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         crop = annotated[y1v:y1v + zoom_h, x1v:x1v + zoom_w]
         out_frame = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        enc.stdin.write(out_frame.tobytes())
+        try:
+            enc.stdin.write(out_frame.tobytes())
+        except (BrokenPipeError, OSError):
+            print(f"Tracking pipe broken at frame {frame_idx}")
+            break
         frame_idx += 1
 
         # Report progress every 5%
@@ -399,11 +407,14 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
             _report(session_id, {"status": "processing", "progress": pct})
 
     cap.release()
-    enc.stdin.close()
+    try:
+        enc.stdin.close()
+    except OSError:
+        pass
     _, stderr_bytes = enc.communicate()
     if enc.returncode != 0:
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
-        raise RuntimeError(f"FFmpeg tracking encode failed (rc={enc.returncode}):\n{stderr_text}")
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-3000:]
+        raise RuntimeError(f"FFmpeg tracking failed after {frame_idx} frames (rc={enc.returncode}):\n{stderr_text}")
 
     return goal_events
 
@@ -449,12 +460,15 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
         try:
             # -- Download raw videos (use keys passed from DB, not reconstructed paths)
             _report(session_id, {"status": "processing", "progress": 5})
-            left_path  = tmp / "left.input"
-            right_path = tmp / "right.input"
+            # Keep .mp4 extension — OpenCV/FFmpeg detect format by content, not extension
+            left_path  = tmp / "left.mp4"
+            right_path = tmp / "right.mp4"
             print(f"Downloading left:  {left_key}")
             print(f"Downloading right: {right_key}")
             _download(s3, left_key,  left_path)
             _download(s3, right_key, right_path)
+            print(f"Downloaded left:  {left_path.stat().st_size} bytes")
+            print(f"Downloaded right: {right_path.stat().st_size} bytes")
             _report(session_id, {"status": "processing", "progress": 10})
 
             # -- Stitch
