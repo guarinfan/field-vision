@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
     .update({ status: "processing", progress: 0 })
     .eq("id", session_id);
 
-  const result = await triggerProcessingJob(session_id);
+  const result = await triggerProcessingJob(session_id, session.left_video_key!, session.right_video_key!);
 
   return NextResponse.json({ ok: true, jobId: result.jobId });
 }

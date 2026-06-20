@@ -440,19 +440,21 @@ def cut_highlights(source: Path, events: list[dict], out_dir: Path) -> list[dict
     timeout=3600,      # 1h max
     memory=8192,
 )
-def process_session(session_id: str) -> None:
+def process_session(session_id: str, left_key: str, right_key: str) -> None:
     s3 = _r2_client()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
         try:
-            # -- Download raw videos
+            # -- Download raw videos (use keys passed from DB, not reconstructed paths)
             _report(session_id, {"status": "processing", "progress": 5})
-            left_path = tmp / "left.mp4"
-            right_path = tmp / "right.mp4"
-            _download(s3, f"sessions/{session_id}/raw/left.mp4", left_path)
-            _download(s3, f"sessions/{session_id}/raw/right.mp4", right_path)
+            left_path  = tmp / "left.input"
+            right_path = tmp / "right.input"
+            print(f"Downloading left:  {left_key}")
+            print(f"Downloading right: {right_key}")
+            _download(s3, left_key,  left_path)
+            _download(s3, right_key, right_path)
             _report(session_id, {"status": "processing", "progress": 10})
 
             # -- Stitch
@@ -525,5 +527,8 @@ def process(body: dict) -> dict:
     if not session_id:
         return {"error": "Missing session_id"}
 
-    process_session.spawn(session_id)
+    left_key  = body.get("left_key",  f"sessions/{session_id}/raw/left.mp4")
+    right_key = body.get("right_key", f"sessions/{session_id}/raw/right.mp4")
+
+    process_session.spawn(session_id, left_key, right_key)
     return {"jobId": f"modal-{session_id}", "ok": True}
