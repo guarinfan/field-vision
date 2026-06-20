@@ -13,7 +13,8 @@ const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
   video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
   audio: true,
 };
-const ADVANCED_LOCK = [{ whiteBalanceMode: "manual", colorTemperature: 5500, exposureMode: "manual", iso: 100, zoom: 1.0 }];
+// Only lock white balance — manual exposure mode makes Phone 2 dark
+const ADVANCED_LOCK = [{ whiteBalanceMode: "manual", colorTemperature: 5500, zoom: 1.0 }];
 
 export default function RecordPage() {
   return (
@@ -130,13 +131,30 @@ function RecordPageInner() {
   const doStartRecording = useCallback(() => {
     const stream = streamRef.current;
     if (!stream) return;
+    if (recorderRef.current?.state === "recording") return; // already recording
     chunksRef.current = [];
-    const mimeType = MediaRecorder.isTypeSupported("video/mp4;codecs=h264") ? "video/mp4;codecs=h264"
-      : MediaRecorder.isTypeSupported("video/webm;codecs=h264") ? "video/webm;codecs=h264" : "video/webm";
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-    recorder.onstop = () => promptUpload();
-    recorder.start(500); // collect chunks every 500ms
+
+    // video/webm works on all browsers; mp4 on iOS Safari only
+    const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+      ? "video/webm;codecs=vp9,opus"
+      : MediaRecorder.isTypeSupported("video/webm")
+      ? "video/webm"
+      : "video/mp4";
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+    } catch {
+      recorder = new MediaRecorder(stream); // fallback: let browser decide
+    }
+
+    recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunksRef.current.push(e.data); };
+    recorder.onstop = () => {
+      // Small delay to ensure all ondataavailable events have fired
+      setTimeout(() => promptUpload(), 100);
+    };
+    // No timeslice — collect everything at stop for maximum reliability
+    recorder.start();
     recorderRef.current = recorder;
     setPhase("recording");
     setRecordingSeconds(0);
@@ -146,10 +164,8 @@ function RecordPageInner() {
   const doStopRecording = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     const recorder = recorderRef.current;
-    if (!recorder) return;
-    // requestData flushes any buffered data before stop fires onstop
-    if (recorder.state === "recording") recorder.requestData();
-    recorder.stop();
+    if (!recorder || recorder.state !== "recording") return;
+    recorder.stop(); // fires ondataavailable with all remaining data, then onstop
   }, []);
 
   const promptUpload = useCallback(() => {
@@ -160,15 +176,20 @@ function RecordPageInner() {
     setShowUploadPrompt(true);
   }, []);
 
-  const doUpload = useCallback(async (blob?: Blob) => {
-    const uploadBlob = blob ?? pendingBlobRef.current;
+  const doUpload = useCallback(async () => {
+    const uploadBlob = pendingBlobRef.current;
     setShowUploadPrompt(false);
     setPhase("uploading");
-    if (!uploadBlob) { setUploadError("No video recorded"); setPhase("error"); return; }
+    if (!uploadBlob || uploadBlob.size === 0) {
+      setUploadError("No video data recorded. Try again.");
+      setPhase("error");
+      return;
+    }
+    const contentType = uploadBlob.type || "video/webm";
     try {
       const res = await fetch("/api/upload", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: id, camera: side }),
+        body: JSON.stringify({ session_id: id, camera: side, content_type: contentType }),
       });
       if (!res.ok) throw new Error(`Upload URL failed: ${res.status}`);
       const { url } = await res.json();
@@ -176,10 +197,10 @@ function RecordPageInner() {
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", url);
-        xhr.setRequestHeader("Content-Type", uploadBlob.type);
+        xhr.setRequestHeader("Content-Type", contentType);
         xhr.upload.onprogress = (e) => { if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100)); };
-        xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`${xhr.status}`));
-        xhr.onerror = () => reject(new Error("Upload error"));
+        xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`R2 upload failed: ${xhr.status}`));
+        xhr.onerror = () => reject(new Error("Network error during upload"));
         xhr.send(uploadBlob);
       });
       await fetch(`/api/sessions/${id}/upload-done`, {
@@ -287,7 +308,7 @@ function RecordPageInner() {
             </div>
             <div className="flex flex-col gap-3 w-full">
               <button
-                onClick={() => doUpload()}
+                onClick={doUpload}
                 className="w-full bg-green-500 active:bg-green-600 text-black font-bold py-4 rounded-2xl text-base"
               >
                 Upload now
@@ -310,7 +331,7 @@ function RecordPageInner() {
         {!showUploadPrompt && phase === "ready" && pendingBlobRef.current && (
           <div className="absolute bottom-0 left-0 right-0 bg-black/80 px-6 py-4">
             <button
-              onClick={() => doUpload()}
+              onClick={doUpload}
               className="w-full bg-green-500 text-black font-bold py-4 rounded-2xl text-base flex items-center justify-center gap-2"
             >
               <Upload size={18} /> Upload video now
