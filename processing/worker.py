@@ -90,46 +90,46 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
-def _align_frames(left_frame, right_frame, overlap_frac: float = 0.40):
+def _compute_color_gain(left_frame, right_frame, crop_frac: float = 0.25) -> "np.ndarray":
     """
-    Use phase correlation to find the horizontal/vertical pixel offset between
-    the overlap zones of left and right frames. Returns (dx, dy, overlap_w).
-    dx > 0 means right frame needs to shift right to align.
+    Compute per-channel gain to match right frame brightness to left frame.
+    Samples a strip on the inner edge of each frame (where they're most similar).
     """
-    import cv2
     import numpy as np
-
     h, w = left_frame.shape[:2]
-    overlap_w = int(w * overlap_frac)
-
-    left_roi  = left_frame[:, w - overlap_w:]
-    right_roi = right_frame[:, :overlap_w]
-
-    scale = 0.5
-    gl = cv2.cvtColor(cv2.resize(left_roi,  None, fx=scale, fy=scale), cv2.COLOR_BGR2GRAY).astype(np.float64)
-    gr = cv2.cvtColor(cv2.resize(right_roi, None, fx=scale, fy=scale), cv2.COLOR_BGR2GRAY).astype(np.float64)
-
-    (dx, dy), _ = cv2.phaseCorrelate(gl, gr)
-    return int(dx / scale), int(dy / scale), overlap_w
+    strip_w = int(w * 0.05)  # 5% strip from each inner edge
+    l_strip = left_frame[:, w - strip_w:].astype(np.float32)
+    r_strip = right_frame[:, :strip_w].astype(np.float32)
+    gain = np.ones(3, dtype=np.float32)
+    for c in range(3):
+        lm = l_strip[:, :, c].mean()
+        rm = r_strip[:, :, c].mean()
+        if rm > 2:
+            gain[c] = np.clip(lm / rm, 0.5, 2.0)
+    return gain
 
 
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Panoramic stitch:
-    1. Phase-correlate overlap zones to find pixel offset between cameras.
-    2. Warp right frame by that offset to align with left frame.
-    3. Hard-cut at center of overlap with narrow blend. No parallax doubling.
+    Panoramic stitch: crop the inner overlap zone from each camera,
+    colour-match, join with a 16px feather. No warping — preserves quality.
+
+    CROP_FRAC controls how much of the inner edge of each frame is discarded.
+    Set to 0.22 (22%) — phones aimed at center each overlap ~22% at the seam.
+    Adjust this value if the seam shifts left/right for a given mount setup.
     """
     import cv2
     import numpy as np
+
+    CROP_FRAC = 0.22   # fraction of each frame's inner edge to discard
+    FEATHER   = 16     # px blend width at the join
 
     cap_l = cv2.VideoCapture(str(left_path))
     cap_r = cv2.VideoCapture(str(right_path))
 
     fps = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
-
-    w = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w   = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h   = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     def read_resized(cap):
         ret, frame = cap.read()
@@ -139,75 +139,31 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
             frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
         return True, frame
 
+    crop_px   = int(w * CROP_FRAC)      # columns to drop from each inner edge
+    left_keep = w - crop_px              # keep left[:, :left_keep]
+    right_skip = crop_px                 # skip right[:, :right_skip]
+    right_keep = w - crop_px            # keep right[:, right_skip:]
+
+    out_w = left_keep + right_keep
+    out_h = h
+
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Sample frames to find stable alignment offset
-    dx_samples, dy_samples, overlap_samples = [], [], []
-    for sample_pos in [0.3, 0.5, 0.7]:
-        fidx = int(total * sample_pos)
-        cap_l.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-        cap_r.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-        ret_l, fl = read_resized(cap_l)
-        ret_r, fr = read_resized(cap_r)
-        if ret_l and ret_r:
-            dx, dy, ow = _align_frames(fl, fr)
-            dx_samples.append(dx)
-            dy_samples.append(dy)
-            overlap_samples.append(ow)
-
-    # Compute per-channel gain to match right frame exposure to left frame.
-    color_gain = np.ones(3, dtype=np.float32)
-    if dx_samples:
-        gain_samples = []
-        for sample_pos in [0.3, 0.5, 0.7]:
-            fidx = int(total * sample_pos)
-            cap_l.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-            cap_r.set(cv2.CAP_PROP_POS_FRAMES, fidx)
-            ret_l, fl = read_resized(cap_l)
-            ret_r, fr = read_resized(cap_r)
-            if ret_l and ret_r:
-                # Color gain using aligned strips
-                seam_col = w - overlap_samples[0] // 2 if overlap_samples else w // 2
-                l_strip = fl[:, max(0, seam_col - 20):seam_col].astype(np.float32)
-                r_strip = fr[:, :20].astype(np.float32)
-                for c in range(3):
-                    lm = l_strip[:, :, c].mean()
-                    rm = r_strip[:, :, c].mean()
-                    gain_samples.append(lm / rm if rm > 1 else 1.0)
-        if gain_samples:
-            g = sum(gain_samples) / len(gain_samples)
-            color_gain[:] = np.clip(g, 0.5, 2.0)
-
-    # Compute average offset and overlap
-    dx = int(sum(dx_samples) / len(dx_samples)) if dx_samples else 0
-    dy = int(sum(dy_samples) / len(dy_samples)) if dy_samples else 0
-    overlap_w = int(sum(overlap_samples) / len(overlap_samples)) if overlap_samples else int(w * 0.40)
-
-    # After alignment, the right frame is shifted by (dx, dy).
-    # The seam cuts at the center of the overlap region.
-    # cut_l: column in left frame where we stop using left
-    # The right frame, once warped, aligns such that its column 0 corresponds
-    # to left column (w - overlap_w + dx).
-    aligned_overlap_start = w - overlap_w + dx
-    seam_col = aligned_overlap_start + overlap_w // 2
-    seam_col = max(w // 3, min(w - w // 5, seam_col))  # sanity clamp
-
-    # right frame column that corresponds to seam_col after alignment
-    right_seam = seam_col - aligned_overlap_start
-
-    out_w = seam_col + (w - right_seam)
-    out_h = h + abs(dy)  # extra height if vertical offset
+    # Sample middle frame for colour gain
+    cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
+    cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
+    _, fl = read_resized(cap_l)
+    _, fr = read_resized(cap_r)
+    color_gain = _compute_color_gain(fl, fr) if fl is not None and fr is not None else np.ones(3, dtype=np.float32)
 
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    # Affine warp matrix for right frame: pure translation by (dx, dy)
-    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    alpha = np.linspace(1, 0, FEATHER, dtype=np.float32)[np.newaxis, :]
 
-    BLEND_W = 32
     tmp_out = out_path.with_suffix(".raw.mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(tmp_out), fourcc, fps, (out_w, out_h))
+    fourcc  = cv2.VideoWriter_fourcc(*"mp4v")
+    writer  = cv2.VideoWriter(str(tmp_out), fourcc, fps, (out_w, out_h))
 
     while True:
         ret_l, frame_l = read_resized(cap_l)
@@ -215,33 +171,26 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         if not ret_l or not ret_r:
             break
 
-        # Exposure-correct right frame
-        frame_r_f = np.clip(
+        # Colour-correct right frame
+        frame_r = np.clip(
             frame_r.astype(np.float32) * color_gain[np.newaxis, np.newaxis, :],
             0, 255
         ).astype(np.uint8)
 
-        # Warp right frame to align with left frame perspective
-        frame_r_warped = cv2.warpAffine(frame_r_f, M, (w, h + abs(dy)),
-                                         flags=cv2.INTER_LINEAR,
-                                         borderMode=cv2.BORDER_REPLICATE)
-
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-        # Left side up to seam
-        canvas[:h, :seam_col] = frame_l[:, :seam_col]
-        # Right side from seam onward (from warped right frame)
-        rh = frame_r_warped.shape[0]
-        canvas[:rh, seam_col:] = frame_r_warped[:, right_seam:right_seam + (out_w - seam_col)]
+        # Left portion (drop inner crop_px columns)
+        canvas[:, :left_keep] = frame_l[:, :left_keep]
+        # Right portion (drop inner crop_px columns)
+        canvas[:, left_keep:] = frame_r[:, right_skip:]
 
-        # Blend at seam
-        b = min(BLEND_W, seam_col, frame_r_warped.shape[1] - right_seam)
-        if b > 0:
+        # Feather at the join
+        f = min(FEATHER, left_keep, right_keep)
+        if f > 1:
+            a = np.linspace(1, 0, f, dtype=np.float32)[np.newaxis, :]
             for c in range(3):
-                lc = frame_l[:, seam_col - b:seam_col, c].astype(np.float32)
-                rc = frame_r_warped[:h, right_seam - b // 2:right_seam - b // 2 + b, c].astype(np.float32)
-                if lc.shape == rc.shape:
-                    a = np.linspace(1, 0, b, dtype=np.float32)[np.newaxis, :]
-                    canvas[:h, seam_col - b:seam_col, c] = (lc * a + rc * (1 - a)).astype(np.uint8)
+                lc = frame_l[:, left_keep - f:left_keep, c].astype(np.float32)
+                rc = frame_r[:, right_skip:right_skip + f, c].astype(np.float32)
+                canvas[:, left_keep - f:left_keep, c] = (lc * a + rc * (1 - a)).astype(np.uint8)
 
         writer.write(canvas)
 
@@ -378,30 +327,28 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         # Determine zoom target: ball > player cluster > last known ball
         target_cx, target_cy, target_w = None, None, w
 
-        if ball_cx is not None:
-            target_cx, target_cy = ball_cx, ball_cy
-            target_w = ZOOM_W_BALL
-        else:
-            # Fall back to centroid of detected players
-            player_boxes = [b for b in results[0].boxes if int(b.cls[0]) == 0]
-            if player_boxes:
-                pxs = [(int(b.xyxy[0][0]) + int(b.xyxy[0][2])) // 2 for b in player_boxes]
-                pys = [(int(b.xyxy[0][1]) + int(b.xyxy[0][3])) // 2 for b in player_boxes]
-                target_cx = int(sum(pxs) / len(pxs))
-                target_cy = int(sum(pys) / len(pys))
-                target_w = ZOOM_W_PLAYER
-            elif last_ball_cx is not None:
-                target_cx, target_cy = last_ball_cx, last_ball_cy
-                target_w = ZOOM_W_BALL
+        # Collect all player centroids from full-frame detection (high confidence only)
+        all_players = [
+            b for b in results[0].boxes
+            if int(b.cls[0]) == 0 and float(b.conf[0]) > 0.4
+        ]
 
-        if target_cx is not None:
-            pos_history.append((target_cx, target_cy, target_w))
+        if ball_cx is not None:
+            # Ball found — track it tightly
+            pos_history.append((ball_cx, ball_cy, ZOOM_W_BALL))
+            no_detect_frames = 0
+        elif all_players:
+            # No ball — zoom to centroid of player cluster
+            pxs = [(int(b.xyxy[0][0]) + int(b.xyxy[0][2])) // 2 for b in all_players]
+            pys = [(int(b.xyxy[0][1]) + int(b.xyxy[0][3])) // 2 for b in all_players]
+            cx = int(sum(pxs) / len(pxs))
+            cy = int(sum(pys) / len(pys))
+            pos_history.append((cx, cy, ZOOM_W_PLAYER))
             no_detect_frames = 0
         else:
             no_detect_frames += 1
 
         if pos_history:
-            # Smooth position via rolling average of recent detections
             avg_cx = int(sum(p[0] for p in pos_history) / len(pos_history))
             avg_cy = int(sum(p[1] for p in pos_history) / len(pos_history))
             avg_tw = int(sum(p[2] for p in pos_history) / len(pos_history))
@@ -411,7 +358,6 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
             zoom_w = int(zoom_w + (avg_tw - zoom_w) * ZOOM_IN_LERP)
             zoom_h = int(zoom_h + (target_h - zoom_h) * ZOOM_IN_LERP)
         elif no_detect_frames > HOLD_FRAMES:
-            # Only zoom out after holding position for a while
             zoom_w = int(zoom_w + (w - zoom_w) * ZOOM_OUT_LERP)
             zoom_h = int(zoom_h + (h - zoom_h) * ZOOM_OUT_LERP)
 
