@@ -73,13 +73,9 @@ function RecordPageInner() {
 
   useEffect(() => { setOrigin(window.location.origin); }, []);
 
-  // Broadcast our phase to the peer
+  // Update our presence state (peers see this immediately, even if they join later)
   const broadcast = useCallback((p: Phase) => {
-    channelRef.current?.send({
-      type: "broadcast",
-      event: "phase",
-      payload: { side, phase: p },
-    });
+    channelRef.current?.track({ side, phase: p });
   }, [side]);
 
   // Open camera with locked settings (identical on both phones)
@@ -186,33 +182,37 @@ function RecordPageInner() {
     }
   }, [id, side, broadcast]);
 
-  // Supabase Realtime channel
+  // Supabase Realtime channel — uses Presence so late joiners get state immediately
   useEffect(() => {
-    const channel = supabase
-      .channel(`recording:${id}`)
-      .on("broadcast", { event: "phase" }, ({ payload }) => {
-        if (payload.side === side) return; // ignore own echo
-        const peerP = payload.phase as Phase;
-        setPeerPhase(peerP);
+    const channel = supabase.channel(`recording:${id}`, {
+      config: { presence: { key: side } },
+    });
 
-        // Re-broadcast our own current phase so a late-joining peer catches up
-        broadcast(phaseRef.current);
+    // Presence: fires whenever anyone joins/leaves/updates
+    channel.on("presence", { event: "sync" }, () => {
+      const state = channel.presenceState<{ phase: Phase }>();
+      const peers = Object.entries(state).filter(([k]) => k !== side);
+      if (peers.length === 0) return;
+      const [[, presences]] = peers;
+      const peerP = (presences[0] as any).phase as Phase;
+      setPeerPhase(peerP);
 
-        // If both are waiting → open cameras simultaneously
-        if (peerP === "waiting-peer" && phaseRef.current === "waiting-peer") {
-          openCamera();
-        }
-      })
-      .on("broadcast", { event: "control" }, ({ payload }) => {
-        if (payload.action === "start") startRecording();
-        if (payload.action === "stop") stopRecording();
-      })
-      .subscribe(() => {
-        // Announce ourselves; repeat a few times so the peer doesn't miss it
-        broadcast("waiting-peer");
-        setTimeout(() => broadcast("waiting-peer"), 800);
-        setTimeout(() => broadcast("waiting-peer"), 2000);
-      });
+      if (peerP === "waiting-peer" && phaseRef.current === "waiting-peer") {
+        openCamera();
+      }
+    });
+
+    // Broadcast for start/stop control signals
+    channel.on("broadcast", { event: "control" }, ({ payload }) => {
+      if (payload.action === "start") startRecording();
+      if (payload.action === "stop") stopRecording();
+    });
+
+    channel.subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        await channel.track({ side, phase: "waiting-peer" });
+      }
+    });
 
     channelRef.current = channel;
     return () => { supabase.removeChannel(channel); };
