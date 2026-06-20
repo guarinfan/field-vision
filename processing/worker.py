@@ -90,45 +90,51 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
-def _find_overlap(left_frame, right_frame) -> int:
+def _find_cut_column(left_frame, right_frame, search_frac: float = 0.30) -> tuple[int, int]:
     """
-    Find the best overlap width between left and right frames by scanning
-    candidate overlap amounts and picking the one with minimum pixel difference.
-    Works on grass/uniform scenes where feature matching fails.
-    Returns overlap in pixels.
+    Find the best hard-cut column in the overlap zone using minimum error seam.
+    Returns (cut_col_in_left, cut_col_in_right) where:
+      - left frame is used up to cut_col_in_left
+      - right frame is used from cut_col_in_right onward
+    This avoids ghosting caused by blending geometrically misaligned frames.
     """
     import cv2
     import numpy as np
 
     h, w = left_frame.shape[:2]
-    # Downsample for speed
     scale = 0.25
     small_l = cv2.resize(left_frame, None, fx=scale, fy=scale)
     small_r = cv2.resize(right_frame, None, fx=scale, fy=scale)
     sw = int(w * scale)
 
-    best_overlap = int(w * 0.20)
+    search_w = int(sw * search_frac)
+    best_col_l = sw - search_w // 2
     best_score = float("inf")
 
-    # Try overlap fractions from 10% to 40%
-    for frac in [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
-        op = int(sw * frac)
-        left_strip  = small_l[:, sw - op:].astype(np.float32)
-        right_strip = small_r[:, :op].astype(np.float32)
-        if left_strip.shape != right_strip.shape:
-            continue
-        score = np.mean(np.abs(left_strip - right_strip))
-        if score < best_score:
-            best_score = score
-            best_overlap = int(w * frac)
+    # Scan columns in the right portion of the left frame
+    for col_l in range(sw - search_w, sw):
+        # Try matching this column in left to the corresponding column in right
+        # right_col is relative to start of right frame
+        for col_r in range(0, search_w):
+            left_col  = small_l[:, col_l].astype(np.float32)
+            right_col = small_r[:, col_r].astype(np.float32)
+            score = np.mean(np.abs(left_col - right_col))
+            if score < best_score:
+                best_score = score
+                best_col_l = col_l
+                best_col_r = col_r
 
-    return best_overlap
+    # Scale back to full resolution
+    cut_l = int(best_col_l / scale)
+    cut_r = int(best_col_r / scale)
+    return cut_l, cut_r
 
 
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Panoramic stitch using pixel-similarity overlap detection + gradient seam blend.
-    More robust than feature matching on low-texture scenes (grass fields).
+    Panoramic stitch using minimum-error hard-cut seam.
+    Finds the vertical column where left and right frames match best,
+    cuts cleanly there — no blending, no ghosting.
     """
     import cv2
     import numpy as np
@@ -138,7 +144,6 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
     fps = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
 
-    # Normalize both videos to the same resolution (use left as reference)
     w = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -152,8 +157,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Sample 3 frames and average the detected overlap
-    overlap_samples = []
+    # Sample frames to find the best cut columns
+    cut_l_samples, cut_r_samples = [], []
     for sample_pos in [0.3, 0.5, 0.7]:
         fidx = int(total * sample_pos)
         cap_l.set(cv2.CAP_PROP_POS_FRAMES, fidx)
@@ -161,18 +166,23 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         ret_l, fl = read_resized(cap_l)
         ret_r, fr = read_resized(cap_r)
         if ret_l and ret_r:
-            overlap_samples.append(_find_overlap(fl, fr))
+            cl, cr = _find_cut_column(fl, fr)
+            cut_l_samples.append(cl)
+            cut_r_samples.append(cr)
 
-    overlap_px = int(sum(overlap_samples) / len(overlap_samples)) if overlap_samples else int(w * 0.20)
-    out_w = w + (w - overlap_px)
+    cut_l = int(sum(cut_l_samples) / len(cut_l_samples)) if cut_l_samples else int(w * 0.75)
+    cut_r = int(sum(cut_r_samples) / len(cut_r_samples)) if cut_r_samples else int(w * 0.05)
+
+    # Output width: left portion + right portion after cut
+    out_w = cut_l + (w - cut_r)
     out_h = h
 
-    # Reset to start
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    seam_start = w - overlap_px
-    alpha_blend = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
+    # Thin blend at cut (8px) to hide any remaining colour mismatch
+    BLEND_W = 8
+    alpha_thin = np.linspace(1, 0, BLEND_W, dtype=np.float32)[np.newaxis, :]
 
     tmp_out = out_path.with_suffix(".raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -185,16 +195,18 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
             break
 
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-        # Left portion: solid left frame
-        canvas[:, :seam_start] = frame_l[:, :seam_start]
-        # Right portion: right frame shifted to fill remaining canvas
-        canvas[:, w:] = frame_r[:, overlap_px:overlap_px + (out_w - w)]
-        # Seam blend zone: gradient from left → right
-        for c in range(3):
-            l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
-            r_seam = frame_r[:, :overlap_px, c].astype(np.float32)
-            canvas[:, seam_start:w, c] = (l_seam * alpha_blend + r_seam * (1 - alpha_blend)).astype(np.uint8)
+        # Left side: everything up to the cut
+        canvas[:, :cut_l] = frame_l[:, :cut_l]
+        # Right side: everything from right cut onward
+        canvas[:, cut_l:] = frame_r[:, cut_r:]
+        # Thin blend at the seam to smooth colour discontinuity
+        b = min(BLEND_W, cut_l, frame_r.shape[1] - cut_r)
+        if b > 0:
+            for c in range(3):
+                lc = frame_l[:, cut_l - b:cut_l, c].astype(np.float32)
+                rc = frame_r[:, cut_r:cut_r + b, c].astype(np.float32)
+                a  = np.linspace(1, 0, b, dtype=np.float32)[np.newaxis, :]
+                canvas[:, cut_l - b:cut_l, c] = (lc * a + rc * (1 - a)).astype(np.uint8)
 
         writer.write(canvas)
 
@@ -241,16 +253,18 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     tmp_out = output_path.with_suffix(".tmp.mp4")
     writer = cv2.VideoWriter(str(tmp_out), fourcc, fps, (w, h))
 
-    # Viewport for auto-zoom (follows ball)
+    # Viewport for auto-zoom (follows ball or player cluster)
     zoom_x, zoom_y = w // 2, h // 2
-    zoom_w, zoom_h = w, h  # starts at full frame
-    ZOOM_W_TARGET = w // 2   # zoom window width when ball is detected
-    ZOOM_LERP = 0.08          # smooth pan speed
+    zoom_w, zoom_h = w, h
+    ZOOM_W_BALL   = w // 3    # tight zoom when ball is visible
+    ZOOM_W_PLAYER = w // 2    # wider zoom when tracking player cluster
+    ZOOM_LERP = 0.18           # pan speed (higher = snappier)
+    ZOOM_IN_LERP = 0.12        # zoom-in speed
+    ZOOM_OUT_LERP = 0.04       # zoom-out speed (slower = less jarring)
 
-    # Last known ball position for search-window fallback
     last_ball_cx: int | None = None
     last_ball_cy: int | None = None
-    SEARCH_R = int(w * 0.15)  # search radius around last position (15% of width)
+    SEARCH_R = int(w * 0.15)
 
     goal_events: list[dict] = []
     frame_idx = 0
@@ -320,18 +334,34 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         if ball_cx is not None:
             last_ball_cx, last_ball_cy = ball_cx, ball_cy
 
-        # Smooth auto-zoom toward ball
-        if ball_cx is not None and ball_cy is not None:
-            target_w = ZOOM_W_TARGET
-            target_h = int(target_w * h / w)
-            zoom_x = int(zoom_x + (ball_cx - zoom_x) * ZOOM_LERP)
-            zoom_y = int(zoom_y + (ball_cy - zoom_y) * ZOOM_LERP)
-            zoom_w = int(zoom_w + (target_w - zoom_w) * ZOOM_LERP)
-            zoom_h = int(zoom_h + (target_h - zoom_h) * ZOOM_LERP)
+        # Determine zoom target: ball > player cluster > last known ball
+        target_cx, target_cy, target_w = None, None, w
+
+        if ball_cx is not None:
+            target_cx, target_cy = ball_cx, ball_cy
+            target_w = ZOOM_W_BALL
         else:
-            # Slowly zoom back out
-            zoom_w = int(zoom_w + (w - zoom_w) * 0.02)
-            zoom_h = int(zoom_h + (h - zoom_h) * 0.02)
+            # Fall back to centroid of detected players
+            player_boxes = [b for b in results[0].boxes if int(b.cls[0]) == 0]
+            if player_boxes:
+                pxs = [(int(b.xyxy[0][0]) + int(b.xyxy[0][2])) // 2 for b in player_boxes]
+                pys = [(int(b.xyxy[0][1]) + int(b.xyxy[0][3])) // 2 for b in player_boxes]
+                target_cx = int(sum(pxs) / len(pxs))
+                target_cy = int(sum(pys) / len(pys))
+                target_w = ZOOM_W_PLAYER
+            elif last_ball_cx is not None:
+                target_cx, target_cy = last_ball_cx, last_ball_cy
+                target_w = ZOOM_W_BALL
+
+        if target_cx is not None:
+            target_h = int(target_w * h / w)
+            zoom_x = int(zoom_x + (target_cx - zoom_x) * ZOOM_LERP)
+            zoom_y = int(zoom_y + (target_cy - zoom_y) * ZOOM_LERP)
+            zoom_w = int(zoom_w + (target_w - zoom_w) * ZOOM_IN_LERP)
+            zoom_h = int(zoom_h + (target_h - zoom_h) * ZOOM_IN_LERP)
+        else:
+            zoom_w = int(zoom_w + (w - zoom_w) * ZOOM_OUT_LERP)
+            zoom_h = int(zoom_h + (h - zoom_h) * ZOOM_OUT_LERP)
 
         # Clamp viewport
         half_w, half_h = zoom_w // 2, zoom_h // 2
