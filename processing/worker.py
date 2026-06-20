@@ -90,55 +90,45 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
-def _compute_homography(left_frame, right_frame):
+def _find_overlap(left_frame, right_frame) -> int:
     """
-    Detect ORB features in the overlapping region of both frames and compute
-    the homography that warps the right frame to align with the left frame.
-    Returns homography matrix or None if not enough matches.
+    Find the best overlap width between left and right frames by scanning
+    candidate overlap amounts and picking the one with minimum pixel difference.
+    Works on grass/uniform scenes where feature matching fails.
+    Returns overlap in pixels.
     """
     import cv2
     import numpy as np
 
     h, w = left_frame.shape[:2]
+    # Downsample for speed
+    scale = 0.25
+    small_l = cv2.resize(left_frame, None, fx=scale, fy=scale)
+    small_r = cv2.resize(right_frame, None, fx=scale, fy=scale)
+    sw = int(w * scale)
 
-    # Only look for features in the right 30% of left frame and left 30% of right frame
-    overlap = int(w * 0.30)
-    left_roi  = left_frame[:, w - overlap:]
-    right_roi = right_frame[:, :overlap]
+    best_overlap = int(w * 0.20)
+    best_score = float("inf")
 
-    orb = cv2.ORB_create(2000)
-    kp1, des1 = orb.detectAndCompute(cv2.cvtColor(left_roi,  cv2.COLOR_BGR2GRAY), None)
-    kp2, des2 = orb.detectAndCompute(cv2.cvtColor(right_roi, cv2.COLOR_BGR2GRAY), None)
+    # Try overlap fractions from 10% to 40%
+    for frac in [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]:
+        op = int(sw * frac)
+        left_strip  = small_l[:, sw - op:].astype(np.float32)
+        right_strip = small_r[:, :op].astype(np.float32)
+        if left_strip.shape != right_strip.shape:
+            continue
+        score = np.mean(np.abs(left_strip - right_strip))
+        if score < best_score:
+            best_score = score
+            best_overlap = int(w * frac)
 
-    if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
-        return None
-
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-    matches = bf.knnMatch(des1, des2, k=2)
-
-    good = [m for m, n in matches if m.distance < 0.75 * n.distance]
-    if len(good) < 8:
-        return None
-
-    # Shift keypoint coordinates back to full-frame space
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
-    pts1[:, 0] += w - overlap  # shift x back into full left frame
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
-    # pts2 are already in right-frame local coords (no shift needed for warp source)
-
-    H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
-    if H is None or mask.sum() < 6:
-        return None
-
-    return H, overlap
+    return best_overlap
 
 
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Panoramic stitch:
-      1. Sample frames to compute homography for the overlapping center region.
-      2. Warp right video onto left canvas with gradient seam blend.
-      3. Falls back to gradient hstack if feature matching fails (e.g. low texture).
+    Panoramic stitch using pixel-similarity overlap detection + gradient seam blend.
+    More robust than feature matching on low-texture scenes (grass fields).
     """
     import cv2
     import numpy as np
@@ -160,45 +150,29 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
             frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
         return True, frame
 
-    # -- Sample a few mid-video frames to compute a stable homography
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
-    H_matrix = None
-    overlap_px = int(w * 0.20)  # default overlap assumption
-    out_w = w + (w - overlap_px)
-    out_h = h
 
+    # Sample 3 frames and average the detected overlap
+    overlap_samples = []
     for sample_pos in [0.3, 0.5, 0.7]:
-        frame_idx = int(total * sample_pos)
-        cap_l.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        cap_r.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        fidx = int(total * sample_pos)
+        cap_l.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+        cap_r.set(cv2.CAP_PROP_POS_FRAMES, fidx)
         ret_l, fl = read_resized(cap_l)
         ret_r, fr = read_resized(cap_r)
-        if not ret_l or not ret_r:
-            continue
-        result = _compute_homography(fl, fr)
-        if result is not None:
-            H_candidate, overlap_candidate = result
-            # Sanity check: warp the four corners of right frame and verify
-            # they land within a reasonable distance of the canvas
-            corners = np.float32([[0,0],[w,0],[w,h],[0,h]]).reshape(-1,1,2)
-            warped_corners = cv2.perspectiveTransform(corners, H_candidate)
-            xs = warped_corners[:,:,0].flatten()
-            ys = warped_corners[:,:,1].flatten()
-            # Reject if warped corners are wildly outside the canvas
-            if xs.min() > -w and xs.max() < out_w + w and ys.min() > -h and ys.max() < out_h + h:
-                H_matrix = H_candidate
-                overlap_px = overlap_candidate
-                break
+        if ret_l and ret_r:
+            overlap_samples.append(_find_overlap(fl, fr))
+
+    overlap_px = int(sum(overlap_samples) / len(overlap_samples)) if overlap_samples else int(w * 0.20)
+    out_w = w + (w - overlap_px)
+    out_h = h
 
     # Reset to start
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    # Build gradient blend mask for the seam (overlap region)
-    blend_mask = np.zeros((h, out_w), dtype=np.float32)
-    for x in range(overlap_px):
-        alpha = 1.0 - (x / overlap_px)  # 1.0 at left edge of overlap, 0.0 at right
-        blend_mask[:, w - overlap_px + x] = alpha
+    seam_start = w - overlap_px
+    alpha_blend = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
 
     tmp_out = out_path.with_suffix(".raw.mp4")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -212,30 +186,15 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
-        seam_start = w - overlap_px  # x where overlap begins in canvas
-
-        if H_matrix is not None:
-            warped_r = cv2.warpPerspective(frame_r, H_matrix, (out_w, out_h))
-            # Left of seam: solid left frame
-            canvas[:, :seam_start] = frame_l[:, :seam_start]
-            # Right of left frame: solid warped right
-            canvas[:, w:] = warped_r[:, w:]
-            # Overlap zone: gradient from left → warped right
-            alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
-            for c in range(3):
-                l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
-                r_seam = warped_r[:, seam_start:w, c].astype(np.float32)
-                canvas[:, seam_start:w, c] = (l_seam * alpha + r_seam * (1 - alpha)).astype(np.uint8)
-        else:
-            # Fallback: left fills left, right fills right, gradient at seam
-            canvas[:, :seam_start] = frame_l[:, :seam_start]
-            right_width = out_w - seam_start  # = w
-            canvas[:, seam_start:] = frame_r[:, :right_width]
-            alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
-            for c in range(3):
-                l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
-                r_seam = frame_r[:, :overlap_px, c].astype(np.float32)
-                canvas[:, seam_start:w, c] = (l_seam * alpha + r_seam * (1 - alpha)).astype(np.uint8)
+        # Left portion: solid left frame
+        canvas[:, :seam_start] = frame_l[:, :seam_start]
+        # Right portion: right frame shifted to fill remaining canvas
+        canvas[:, w:] = frame_r[:, overlap_px:overlap_px + (out_w - w)]
+        # Seam blend zone: gradient from left → right
+        for c in range(3):
+            l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
+            r_seam = frame_r[:, :overlap_px, c].astype(np.float32)
+            canvas[:, seam_start:w, c] = (l_seam * alpha_blend + r_seam * (1 - alpha_blend)).astype(np.uint8)
 
         writer.write(canvas)
 
