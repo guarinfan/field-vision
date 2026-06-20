@@ -239,9 +239,16 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    tmp_out = output_path.with_suffix(".tmp.mp4")
-    writer = cv2.VideoWriter(str(tmp_out), fourcc, fps, (w, h))
+    # Pipe frames directly to FFmpeg — avoids VideoWriter/mp4v intermediate file
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        str(output_path),
+    ]
+    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
     # Viewport for auto-zoom (follows ball or player cluster)
     zoom_x, zoom_y = w // 2, h // 2
@@ -374,7 +381,7 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         crop = annotated[y1v:y1v + zoom_h, x1v:x1v + zoom_w]
         out_frame = cv2.resize(crop, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        writer.write(out_frame)
+        enc.stdin.write(out_frame.tobytes())
         frame_idx += 1
 
         # Report progress every 5%
@@ -383,16 +390,8 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
             _report(session_id, {"status": "processing", "progress": pct})
 
     cap.release()
-    writer.release()
-
-    # Re-mux to ensure valid mp4 with audio
-    cmd = [
-        "ffmpeg", "-y", "-i", str(tmp_out),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-        str(output_path),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-    tmp_out.unlink(missing_ok=True)
+    enc.stdin.close()
+    enc.wait()
 
     return goal_events
 
