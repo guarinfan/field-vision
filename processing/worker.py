@@ -102,9 +102,9 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     import cv2
     import numpy as np
 
-    LEFT_CROP  = 0.15   # drop 15% from right edge of left camera
+    LEFT_CROP  = 0.10   # drop 10% from right edge of left camera
     RIGHT_CROP = 0.22   # drop 22% from left edge of right camera
-    FEATHER    = 80     # pixel blend width at seam
+    FEATHER    = 40     # pixel blend width at seam
 
     cap_l = cv2.VideoCapture(str(left_path))
     cap_r = cv2.VideoCapture(str(right_path))
@@ -115,8 +115,9 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     w_r   = int(cap_r.get(cv2.CAP_PROP_FRAME_WIDTH))
     h_r   = int(cap_r.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Normalise to left frame dimensions
-    W, H = w_l, h_l
+    # Normalise to the LARGER frame to preserve quality (upscale smaller, not downscale larger)
+    W = max(w_l, w_r)
+    H = max(h_l, h_r)
 
     def read_frame(cap):
         ret, frame = cap.read()
