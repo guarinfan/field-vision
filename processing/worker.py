@@ -212,32 +212,30 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
+        seam_start = w - overlap_px  # x where overlap begins in canvas
+
         if H_matrix is not None:
             warped_r = cv2.warpPerspective(frame_r, H_matrix, (out_w, out_h))
-            canvas = warped_r.copy()
+            # Left of seam: solid left frame
+            canvas[:, :seam_start] = frame_l[:, :seam_start]
+            # Right of left frame: solid warped right
+            canvas[:, w:] = warped_r[:, w:]
+            # Overlap zone: gradient from left → warped right
+            alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
             for c in range(3):
-                canvas[:, :w, c] = (
-                    frame_l[:, :w, c].astype(np.float32) * (1 - blend_mask[:, :w]) +
-                    canvas[:, :w, c].astype(np.float32) * blend_mask[:, :w]
-                ).astype(np.uint8)
-            canvas[:, :w - overlap_px] = frame_l[:, :w - overlap_px]
+                l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
+                r_seam = warped_r[:, seam_start:w, c].astype(np.float32)
+                canvas[:, seam_start:w, c] = (l_seam * alpha + r_seam * (1 - alpha)).astype(np.uint8)
         else:
-            # Simple robust fallback: left frame fills left side,
-            # right frame fills right side, gradient blend at seam
-            canvas[:, :w] = frame_l
-
-            # Right portion of canvas starts at (w - overlap_px)
-            right_start = w - overlap_px
-            right_width = out_w - right_start  # = w
-            # Take first right_width columns of right frame
-            canvas[:, right_start:] = frame_r[:, :right_width]
-
-            # Gradient blend over the overlap zone
+            # Fallback: left fills left, right fills right, gradient at seam
+            canvas[:, :seam_start] = frame_l[:, :seam_start]
+            right_width = out_w - seam_start  # = w
+            canvas[:, seam_start:] = frame_r[:, :right_width]
+            alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
             for c in range(3):
-                seam_l = frame_l[:, right_start:w, c].astype(np.float32)
-                seam_r = frame_r[:, :overlap_px, c].astype(np.float32)
-                alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
-                canvas[:, right_start:w, c] = (seam_l * alpha + seam_r * (1 - alpha)).astype(np.uint8)
+                l_seam = frame_l[:, seam_start:w, c].astype(np.float32)
+                r_seam = frame_r[:, :overlap_px, c].astype(np.float32)
+                canvas[:, seam_start:w, c] = (l_seam * alpha + r_seam * (1 - alpha)).astype(np.uint8)
 
         writer.write(canvas)
 
@@ -272,7 +270,7 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     import numpy as np
     from ultralytics import YOLO
 
-    model = YOLO("yolov8n.pt")  # nano — fast; swap for yolov8x.pt for accuracy
+    model = YOLO("yolov8s.pt")  # small — better small-object detection than nano
 
     cap = cv2.VideoCapture(str(input_path))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -289,6 +287,11 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     zoom_w, zoom_h = w, h  # starts at full frame
     ZOOM_W_TARGET = w // 2   # zoom window width when ball is detected
     ZOOM_LERP = 0.08          # smooth pan speed
+
+    # Last known ball position for search-window fallback
+    last_ball_cx: int | None = None
+    last_ball_cy: int | None = None
+    SEARCH_R = int(w * 0.15)  # search radius around last position (15% of width)
 
     goal_events: list[dict] = []
     frame_idx = 0
@@ -310,6 +313,7 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
 
         ball_cx, ball_cy = None, None
 
+        # First pass — full frame
         for box in results[0].boxes:
             cls = int(box.cls[0])
             x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -333,6 +337,29 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
 
             elif cls == 0:  # person
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 200, 0), 1)
+
+        # Second pass — if ball not found and we have last position,
+        # zoom into a search window and re-run detection at higher effective resolution
+        if ball_cx is None and last_ball_cx is not None:
+            sx1 = max(0, last_ball_cx - SEARCH_R)
+            sy1 = max(0, last_ball_cy - SEARCH_R)
+            sx2 = min(w, last_ball_cx + SEARCH_R)
+            sy2 = min(h, last_ball_cy + SEARCH_R)
+            crop_search = frame[sy1:sy2, sx1:sx2]
+            # Upscale 2x so small ball appears larger to YOLO
+            crop_up = cv2.resize(crop_search, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
+            res2 = model(crop_up, verbose=False, classes=[32], conf=0.25)
+            for box2 in res2[0].boxes:
+                x1c, y1c, x2c, y2c = map(int, box2.xyxy[0])
+                # Map back to full-frame coords
+                ball_cx = sx1 + x1c // 2
+                ball_cy = sy1 + y1c // 2
+                cv2.circle(annotated, (ball_cx, ball_cy), 14, (0, 200, 255), 2)
+                cv2.circle(annotated, (ball_cx, ball_cy), 4, (0, 200, 255), -1)
+                break
+
+        if ball_cx is not None:
+            last_ball_cx, last_ball_cy = ball_cx, ball_cy
 
         # Smooth auto-zoom toward ball
         if ball_cx is not None and ball_cy is not None:
