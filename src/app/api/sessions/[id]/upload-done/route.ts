@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getVideoKey } from "@/lib/r2";
+import { videoKey } from "@/lib/r2";
 import type { Session } from "@/types/database";
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
@@ -12,7 +12,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
 
   const field = side === "left" ? "left_video_key" : "right_video_key";
-  const key = getVideoKey(id, side);
+  const key = videoKey(id, side);
 
   // Mark this side's key in the session row
   await supabaseAdmin.from("sessions").update({ [field]: key }).eq("id", id);
