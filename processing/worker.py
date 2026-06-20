@@ -180,7 +180,7 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         "-c:a", "aac",
         str(out_path),
     ]
-    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     frame_idx = 0
     total_f   = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -215,7 +215,10 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     cap_l.release()
     cap_r.release()
     enc.stdin.close()
-    enc.wait()
+    _, stderr_bytes = enc.communicate()
+    if enc.returncode != 0:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
+        raise RuntimeError(f"FFmpeg stitch encode failed (rc={enc.returncode}):\n{stderr_text}")
 
 
 # ---------------------------------------------------------------------------
@@ -234,10 +237,16 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     model = YOLO("yolov8s.pt")  # small — better small-object detection than nano
 
     cap = cv2.VideoCapture(str(input_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video for tracking: {input_path}")
+
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    if w == 0 or h == 0:
+        raise RuntimeError(f"Invalid video dimensions {w}x{h} for {input_path}")
 
     # Pipe frames directly to FFmpeg — avoids VideoWriter/mp4v intermediate file
     ffmpeg_cmd = [
@@ -248,7 +257,7 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         str(output_path),
     ]
-    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
     # Viewport for auto-zoom (follows ball or player cluster)
     zoom_x, zoom_y = w // 2, h // 2
@@ -391,7 +400,10 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
 
     cap.release()
     enc.stdin.close()
-    enc.wait()
+    _, stderr_bytes = enc.communicate()
+    if enc.returncode != 0:
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-2000:]
+        raise RuntimeError(f"FFmpeg tracking encode failed (rc={enc.returncode}):\n{stderr_text}")
 
     return goal_events
 
