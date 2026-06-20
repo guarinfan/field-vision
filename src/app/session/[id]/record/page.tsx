@@ -136,7 +136,7 @@ function RecordPageInner() {
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
     recorder.onstop = () => promptUpload();
-    recorder.start(1000);
+    recorder.start(500); // collect chunks every 500ms
     recorderRef.current = recorder;
     setPhase("recording");
     setRecordingSeconds(0);
@@ -145,7 +145,11 @@ function RecordPageInner() {
 
   const doStopRecording = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
-    recorderRef.current?.stop();
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+    // requestData flushes any buffered data before stop fires onstop
+    if (recorder.state === "recording") recorder.requestData();
+    recorder.stop();
   }, []);
 
   const promptUpload = useCallback(() => {
@@ -172,7 +176,7 @@ function RecordPageInner() {
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", url);
-        xhr.setRequestHeader("Content-Type", blob.type);
+        xhr.setRequestHeader("Content-Type", uploadBlob.type);
         xhr.upload.onprogress = (e) => { if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100)); };
         xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`${xhr.status}`));
         xhr.onerror = () => reject(new Error("Upload error"));
