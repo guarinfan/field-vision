@@ -173,6 +173,33 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     cut_l = int(sum(cut_l_samples) / len(cut_l_samples)) if cut_l_samples else int(w * 0.75)
     cut_r = int(sum(cut_r_samples) / len(cut_r_samples)) if cut_r_samples else int(w * 0.05)
 
+    # Compute per-channel gain to match right frame exposure to left frame.
+    # Sample a 40px strip on each side of the cut and compute mean ratio.
+    SAMPLE_W = 40
+    color_gain = np.ones(3, dtype=np.float32)
+    if cut_l_samples and cut_r_samples:
+        gain_samples = []
+        for sample_pos in [0.3, 0.5, 0.7]:
+            fidx = int(total * sample_pos)
+            cap_l.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            cap_r.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            ret_l, fl = read_resized(cap_l)
+            ret_r, fr = read_resized(cap_r)
+            if ret_l and ret_r:
+                l_strip = fl[:, max(0, cut_l - SAMPLE_W):cut_l].astype(np.float32)
+                r_strip = fr[:, cut_r:cut_r + SAMPLE_W].astype(np.float32)
+                for c in range(3):
+                    lm = l_strip[:, :, c].mean()
+                    rm = r_strip[:, :, c].mean()
+                    if rm > 1:
+                        gain_samples.append(lm / rm)
+                    else:
+                        gain_samples.append(1.0)
+        if gain_samples:
+            # Average gain across samples and channels
+            g = sum(gain_samples) / len(gain_samples)
+            color_gain[:] = np.clip(g, 0.5, 2.0)
+
     # Output width: left portion + right portion after cut
     out_w = cut_l + (w - cut_r)
     out_h = h
@@ -180,8 +207,7 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-    # Thin blend at cut (8px) to hide any remaining colour mismatch
-    BLEND_W = 8
+    BLEND_W = 24  # wider micro-blend for smoother colour transition
     alpha_thin = np.linspace(1, 0, BLEND_W, dtype=np.float32)[np.newaxis, :]
 
     tmp_out = out_path.with_suffix(".raw.mp4")
@@ -194,17 +220,21 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         if not ret_l or not ret_r:
             break
 
+        # Apply exposure correction to right frame before compositing
+        frame_r_corrected = np.clip(
+            frame_r.astype(np.float32) * color_gain[np.newaxis, np.newaxis, :],
+            0, 255
+        ).astype(np.uint8)
+
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-        # Left side: everything up to the cut
         canvas[:, :cut_l] = frame_l[:, :cut_l]
-        # Right side: everything from right cut onward
-        canvas[:, cut_l:] = frame_r[:, cut_r:]
-        # Thin blend at the seam to smooth colour discontinuity
-        b = min(BLEND_W, cut_l, frame_r.shape[1] - cut_r)
+        canvas[:, cut_l:] = frame_r_corrected[:, cut_r:]
+        # Wider blend at seam to smooth any remaining colour transition
+        b = min(BLEND_W, cut_l, frame_r_corrected.shape[1] - cut_r)
         if b > 0:
             for c in range(3):
                 lc = frame_l[:, cut_l - b:cut_l, c].astype(np.float32)
-                rc = frame_r[:, cut_r:cut_r + b, c].astype(np.float32)
+                rc = frame_r_corrected[:, cut_r:cut_r + b, c].astype(np.float32)
                 a  = np.linspace(1, 0, b, dtype=np.float32)[np.newaxis, :]
                 canvas[:, cut_l - b:cut_l, c] = (lc * a + rc * (1 - a)).astype(np.uint8)
 
@@ -256,15 +286,21 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
     # Viewport for auto-zoom (follows ball or player cluster)
     zoom_x, zoom_y = w // 2, h // 2
     zoom_w, zoom_h = w, h
-    ZOOM_W_BALL   = w // 3    # tight zoom when ball is visible
-    ZOOM_W_PLAYER = w // 2    # wider zoom when tracking player cluster
-    ZOOM_LERP = 0.18           # pan speed (higher = snappier)
-    ZOOM_IN_LERP = 0.12        # zoom-in speed
-    ZOOM_OUT_LERP = 0.04       # zoom-out speed (slower = less jarring)
+    ZOOM_W_BALL   = w // 3
+    ZOOM_W_PLAYER = w // 2
+    ZOOM_LERP     = 0.10   # pan lerp — smooth, not snappy
+    ZOOM_IN_LERP  = 0.08
+    ZOOM_OUT_LERP = 0.02   # very slow zoom-out to avoid cutting
 
     last_ball_cx: int | None = None
     last_ball_cy: int | None = None
     SEARCH_R = int(w * 0.15)
+
+    # Rolling buffers for position smoothing
+    from collections import deque
+    pos_history: deque = deque(maxlen=12)  # ~0.4s at 30fps
+    no_detect_frames = 0
+    HOLD_FRAMES = 20  # frames to hold position before zooming out
 
     goal_events: list[dict] = []
     frame_idx = 0
@@ -354,12 +390,23 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
                 target_w = ZOOM_W_BALL
 
         if target_cx is not None:
-            target_h = int(target_w * h / w)
-            zoom_x = int(zoom_x + (target_cx - zoom_x) * ZOOM_LERP)
-            zoom_y = int(zoom_y + (target_cy - zoom_y) * ZOOM_LERP)
-            zoom_w = int(zoom_w + (target_w - zoom_w) * ZOOM_IN_LERP)
-            zoom_h = int(zoom_h + (target_h - zoom_h) * ZOOM_IN_LERP)
+            pos_history.append((target_cx, target_cy, target_w))
+            no_detect_frames = 0
         else:
+            no_detect_frames += 1
+
+        if pos_history:
+            # Smooth position via rolling average of recent detections
+            avg_cx = int(sum(p[0] for p in pos_history) / len(pos_history))
+            avg_cy = int(sum(p[1] for p in pos_history) / len(pos_history))
+            avg_tw = int(sum(p[2] for p in pos_history) / len(pos_history))
+            target_h = int(avg_tw * h / w)
+            zoom_x = int(zoom_x + (avg_cx - zoom_x) * ZOOM_LERP)
+            zoom_y = int(zoom_y + (avg_cy - zoom_y) * ZOOM_LERP)
+            zoom_w = int(zoom_w + (avg_tw - zoom_w) * ZOOM_IN_LERP)
+            zoom_h = int(zoom_h + (target_h - zoom_h) * ZOOM_IN_LERP)
+        elif no_detect_frames > HOLD_FRAMES:
+            # Only zoom out after holding position for a while
             zoom_w = int(zoom_w + (w - zoom_w) * ZOOM_OUT_LERP)
             zoom_h = int(zoom_h + (h - zoom_h) * ZOOM_OUT_LERP)
 
