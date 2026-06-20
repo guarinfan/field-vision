@@ -90,126 +90,90 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
-def _compute_color_gain(left_frame, right_frame, crop_frac: float = 0.25) -> "np.ndarray":
-    """
-    Compute per-channel gain to match right frame brightness to left frame.
-    Samples a strip on the inner edge of each frame (where they're most similar).
-    """
-    import numpy as np
-    h, w = left_frame.shape[:2]
-    strip_w = int(w * 0.05)  # 5% strip from each inner edge
-    l_strip = left_frame[:, w - strip_w:].astype(np.float32)
-    r_strip = right_frame[:, :strip_w].astype(np.float32)
-    gain = np.ones(3, dtype=np.float32)
+def _sample_brightness_ratio(left_path: Path, right_path: Path) -> tuple[float, float, float]:
+    """Sample mid-video frames and return per-channel (B,G,R) brightness ratio left/right."""
+    import cv2
+    cap_l = cv2.VideoCapture(str(left_path))
+    cap_r = cv2.VideoCapture(str(right_path))
+    total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
+    cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
+    ret_l, fl = cap_l.read()
+    ret_r, fr = cap_r.read()
+    cap_l.release()
+    cap_r.release()
+    if not ret_l or not ret_r:
+        return 1.0, 1.0, 1.0
+    # Sample the inner 10% strip of each frame
+    w = fl.shape[1]
+    strip = max(1, int(w * 0.10))
+    ratios = []
     for c in range(3):
-        lm = l_strip[:, :, c].mean()
-        rm = r_strip[:, :, c].mean()
-        if rm > 2:
-            gain[c] = np.clip(lm / rm, 0.5, 2.0)
-    return gain
+        lm = float(fl[:, w - strip:, c].mean())
+        rm = float(fr[:, :strip, c].mean())
+        ratios.append(max(0.5, min(2.0, lm / rm)) if rm > 2 else 1.0)
+    return ratios[0], ratios[1], ratios[2]
 
 
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Panoramic stitch: crop the inner overlap zone from each camera,
-    colour-match, join with a 16px feather. No warping — preserves quality.
+    Panoramic stitch using FFmpeg directly — single encode pass, full quality.
 
-    CROP_FRAC controls how much of the inner edge of each frame is discarded.
-    Set to 0.22 (22%) — phones aimed at center each overlap ~22% at the seam.
-    Adjust this value if the seam shifts left/right for a given mount setup.
+    Crops CROP_FRAC from the inner edge of each frame to remove the overlap zone,
+    applies per-channel brightness correction to the right camera, then hstacks.
+    No OpenCV VideoWriter → no intermediate lossy mp4v encode.
+
+    CROP_FRAC tuning: increase if you still see doubling, decrease if field is cut off.
     """
-    import cv2
-    import numpy as np
+    CROP_FRAC = 0.18  # fraction of inner edge to discard from each camera
 
-    CROP_FRAC = 0.22   # fraction of each frame's inner edge to discard
-    FEATHER   = 16     # px blend width at the join
+    # Get dimensions via ffprobe
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", str(left_path)],
+        capture_output=True, text=True, check=True,
+    )
+    w_str, h_str = probe.stdout.strip().split(",")
+    w, h = int(w_str), int(h_str)
+    crop_px = int(w * CROP_FRAC)
 
-    cap_l = cv2.VideoCapture(str(left_path))
-    cap_r = cv2.VideoCapture(str(right_path))
+    # Compute brightness gain (left / right) per channel B,G,R
+    gb, gg, gr = _sample_brightness_ratio(left_path, right_path)
 
-    fps = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
-    w   = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h   = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # Build FFmpeg filter:
+    # [0:v] crop right CROP_FRAC off → left panel
+    # [1:v] crop left CROP_FRAC off, apply brightness correction → right panel
+    # hstack the two panels
+    left_w  = w - crop_px
+    right_w = w - crop_px
 
-    def read_resized(cap):
-        ret, frame = cap.read()
-        if not ret:
-            return False, None
-        if frame.shape[1] != w or frame.shape[0] != h:
-            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
-        return True, frame
+    # colorchannelmixer uses RGBA matrix; to scale each channel independently:
+    # r_out = rr*r_in, g_out = gg*g_in, b_out = bb*b_in
+    # FFmpeg uses BGR order but colorchannelmixer is RGB-named
+    eq_filter = (
+        f"colorchannelmixer="
+        f"rr={gr:.4f}:gg={gg:.4f}:bb={gb:.4f}"
+    )
 
-    crop_px   = int(w * CROP_FRAC)      # columns to drop from each inner edge
-    left_keep = w - crop_px              # keep left[:, :left_keep]
-    right_skip = crop_px                 # skip right[:, :right_skip]
-    right_keep = w - crop_px            # keep right[:, right_skip:]
+    filter_complex = (
+        f"[0:v]crop={left_w}:ih:0:0[left];"
+        f"[1:v]crop={right_w}:ih:{crop_px}:0,{eq_filter}[right];"
+        f"[left][right]hstack=inputs=2[v]"
+    )
 
-    out_w = left_keep + right_keep
-    out_h = h
-
-    total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    # Sample middle frame for colour gain
-    cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
-    cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
-    _, fl = read_resized(cap_l)
-    _, fr = read_resized(cap_r)
-    color_gain = _compute_color_gain(fl, fr) if fl is not None and fr is not None else np.ones(3, dtype=np.float32)
-
-    cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    alpha = np.linspace(1, 0, FEATHER, dtype=np.float32)[np.newaxis, :]
-
-    tmp_out = out_path.with_suffix(".raw.mp4")
-    fourcc  = cv2.VideoWriter_fourcc(*"mp4v")
-    writer  = cv2.VideoWriter(str(tmp_out), fourcc, fps, (out_w, out_h))
-
-    while True:
-        ret_l, frame_l = read_resized(cap_l)
-        ret_r, frame_r = read_resized(cap_r)
-        if not ret_l or not ret_r:
-            break
-
-        # Colour-correct right frame
-        frame_r = np.clip(
-            frame_r.astype(np.float32) * color_gain[np.newaxis, np.newaxis, :],
-            0, 255
-        ).astype(np.uint8)
-
-        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-        # Left portion (drop inner crop_px columns)
-        canvas[:, :left_keep] = frame_l[:, :left_keep]
-        # Right portion (drop inner crop_px columns)
-        canvas[:, left_keep:] = frame_r[:, right_skip:]
-
-        # Feather at the join
-        f = min(FEATHER, left_keep, right_keep)
-        if f > 1:
-            a = np.linspace(1, 0, f, dtype=np.float32)[np.newaxis, :]
-            for c in range(3):
-                lc = frame_l[:, left_keep - f:left_keep, c].astype(np.float32)
-                rc = frame_r[:, right_skip:right_skip + f, c].astype(np.float32)
-                canvas[:, left_keep - f:left_keep, c] = (lc * a + rc * (1 - a)).astype(np.uint8)
-
-        writer.write(canvas)
-
-    cap_l.release()
-    cap_r.release()
-    writer.release()
-
-    # Re-mux with audio from left camera
     cmd = [
         "ffmpeg", "-y",
-        "-i", str(tmp_out),
         "-i", str(left_path),
-        "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-i", str(right_path),
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-c:a", "aac",
         str(out_path),
     ]
     subprocess.run(cmd, check=True, capture_output=True)
-    tmp_out.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
