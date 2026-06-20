@@ -79,17 +79,16 @@ function RecordPageInner() {
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack && "applyConstraints" in videoTrack) {
         try {
-          await videoTrack.applyConstraints({
-            // @ts-ignore — advanced constraints not in TS types yet
-            advanced: [{
-              whiteBalanceMode: "manual",
-              colorTemperature: 5500,
-              exposureMode: "manual",
-              exposureTime: 1 / 500,
-              iso: 100,
-              zoom: 1.0,
-            }],
-          });
+          // Advanced constraints (white balance, ISO) not in TS types — cast to any
+          const advanced = [{
+            whiteBalanceMode: "manual",
+            colorTemperature: 5500,
+            exposureMode: "manual",
+            exposureTime: 1 / 500,
+            iso: 100,
+            zoom: 1.0,
+          }];
+          await videoTrack.applyConstraints({ advanced } as any);
         } catch {
           // Advanced constraints not supported on this browser/device — continue anyway
         }
