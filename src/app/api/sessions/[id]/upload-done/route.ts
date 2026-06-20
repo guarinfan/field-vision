@@ -3,9 +3,9 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { videoKey } from "@/lib/r2";
 import type { Session } from "@/types/database";
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { side } = await req.json();
-  const { id } = params;
+  const { id } = await params;
 
   if (side !== "left" && side !== "right") {
     return NextResponse.json({ error: "Invalid side" }, { status: 400 });
