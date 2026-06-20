@@ -253,10 +253,10 @@ function RecordPageInner() {
           if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100));
         };
         xhr.onload = () => {
-          if (xhr.status < 300) resolve();
-          else reject(new Error(`Upload failed (${xhr.status}). Check R2 CORS settings.`));
+          if (xhr.status >= 200 && xhr.status < 300) resolve();
+          else reject(new Error(`Upload to R2 failed (status ${xhr.status || "CORS blocked"}) — set CORS on your R2 bucket.`));
         };
-        xhr.onerror = () => reject(new Error("Network error — check R2 CORS is configured for this domain."));
+        xhr.onerror = () => reject(new Error("Upload blocked by CORS — go to Cloudflare → R2 → bucket → Settings → CORS and add this domain."));
         xhr.send(blob);
       });
 
