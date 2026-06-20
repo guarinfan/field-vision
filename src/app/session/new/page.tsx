@@ -109,7 +109,7 @@ export default function NewSessionPage() {
     });
     if (!res.ok) { setError("Failed to create session"); return; }
     const { id } = await res.json();
-    router.push(`/session/${id}/record?side=${side}`);
+    router.push(`/session/${id}/record?side=${side}&host=1`);
   }
 
   return (

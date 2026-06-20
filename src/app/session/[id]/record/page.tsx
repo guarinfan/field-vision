@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState, useCallback, Suspense } from "react";
 import { useParams, useSearchParams } from "next/navigation";
-import { supabase } from "@/lib/supabase";
 import { Loader2, Upload, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { QRCodeSVG } from "qrcode.react";
@@ -10,7 +9,7 @@ import { QRCodeSVG } from "qrcode.react";
 type Side = "left" | "right";
 type Phase = "ready" | "recording" | "uploading" | "done" | "error";
 
-const SHARED_CAMERA_CONSTRAINTS: MediaStreamConstraints = {
+const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
   video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
   audio: true,
 };
@@ -28,6 +27,8 @@ function RecordPageInner() {
   const { id } = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const side = (searchParams.get("side") ?? "left") as Side;
+  // "host" = the phone that created the session; shows QR. Other phone just waits.
+  const isHost = searchParams.get("host") === "1";
   const otherSide: Side = side === "left" ? "right" : "left";
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -35,83 +36,95 @@ function RecordPageInner() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const [phase, setPhase] = useState<Phase>("ready");
   const [peerConnected, setPeerConnected] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [origin, setOrigin] = useState("");
 
   useEffect(() => { setOrigin(window.location.origin); }, []);
 
-  // ── Camera ────────────────────────────────────────────────────────────────
+  // ── Camera ───────────────────────────────────────────────────────────────
   useEffect(() => {
     let active = true;
-    async function start() {
+    (async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia(SHARED_CAMERA_CONSTRAINTS);
+        const stream = await navigator.mediaDevices.getUserMedia(CAMERA_CONSTRAINTS);
         if (!active) { stream.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = stream;
-        const track = stream.getVideoTracks()[0];
-        if (track) {
-          try { await track.applyConstraints({ advanced: ADVANCED_LOCK } as any); } catch {}
-        }
+        try {
+          await stream.getVideoTracks()[0]?.applyConstraints({ advanced: ADVANCED_LOCK } as any);
+        } catch {}
         if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
         if (active) setCameraReady(true);
       } catch (e: any) {
         if (active) setCameraError(e.message ?? "Camera error");
       }
-    }
-    start();
+    })();
     return () => {
       active = false;
       streamRef.current?.getTracks().forEach(t => t.stop());
     };
   }, []);
 
-  // ── Supabase channel for peer detection + start/stop sync ─────────────────
+  // ── Signaling via DB polling ──────────────────────────────────────────────
+  const signal = useCallback(async (action: string) => {
+    await fetch(`/api/sessions/${id}/signal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, side }),
+    });
+  }, [id, side]);
+
+  const pollSignal = useCallback(async (): Promise<{
+    leftConnected: boolean; rightConnected: boolean;
+    startSignal: boolean; stopSignal: boolean;
+  }> => {
+    const res = await fetch(`/api/sessions/${id}/signal`);
+    return res.json();
+  }, [id]);
+
+  // Register this phone as connected
   useEffect(() => {
-    const ch = supabase.channel(`recording:${id}`);
+    signal("connect");
+  }, [signal]);
 
-    ch.on("broadcast", { event: "ping" }, ({ payload }) => {
-      if (payload.side !== side) {
-        setPeerConnected(true);
-        // Reply so the other phone knows we're here too
-        ch.send({ type: "broadcast", event: "ping", payload: { side } });
-      }
-    });
+  // Poll for peer connection + start/stop signals
+  useEffect(() => {
+    let stopped = false;
+    let recordingStarted = false;
+    let recordingStopped = false;
 
-    ch.on("broadcast", { event: "control" }, ({ payload }) => {
-      if (payload.action === "start") doStartRecording();
-      if (payload.action === "stop") doStopRecording();
-    });
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const s = await pollSignal();
+        const myConnected   = side === "left" ? s.leftConnected  : s.rightConnected;
+        const peerIsConn    = side === "left" ? s.rightConnected : s.leftConnected;
+        if (peerIsConn) setPeerConnected(true);
 
-    ch.subscribe((status) => {
-      if (status === "SUBSCRIBED") {
-        // Announce ourselves, keep repeating until peer responds
-        const announce = () => ch.send({ type: "broadcast", event: "ping", payload: { side } });
-        announce();
-        const interval = setInterval(announce, 2000);
-        channelRef.current = ch;
-        // Stop repeating once peer is detected — check via closure
-        const stopInterval = setInterval(() => {
-          if (channelRef.current === null) clearInterval(interval);
-        }, 100);
-        // Clean up after 60s regardless
-        setTimeout(() => { clearInterval(interval); clearInterval(stopInterval); }, 60_000);
-      }
-    });
+        if (s.startSignal && !recordingStarted) {
+          recordingStarted = true;
+          doStartRecording();
+        }
+        if (s.stopSignal && !recordingStopped && recordingStarted) {
+          recordingStopped = true;
+          doStopRecording();
+        }
+      } catch {}
+    };
 
-    channelRef.current = ch;
-    return () => { supabase.removeChannel(ch); channelRef.current = null; };
+    const interval = setInterval(tick, 1500);
+    tick(); // immediate first check
+    return () => { stopped = true; clearInterval(interval); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, side]);
 
-  // ── Recording ─────────────────────────────────────────────────────────────
+  // ── Recording ────────────────────────────────────────────────────────────
   const doStartRecording = useCallback(() => {
     const stream = streamRef.current;
     if (!stream) return;
@@ -140,8 +153,7 @@ function RecordPageInner() {
     const blob = new Blob(chunks, { type: chunks[0].type });
     try {
       const res = await fetch("/api/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: id, side }),
       });
       const { url } = await res.json();
@@ -165,16 +177,19 @@ function RecordPageInner() {
     }
   }, [id, side]);
 
-  const sendControl = (action: "start" | "stop") => {
-    channelRef.current?.send({ type: "broadcast", event: "control", payload: { action } });
-    if (action === "start") doStartRecording();
-    if (action === "stop") doStopRecording();
+  // Tap Start / Stop — write signal to DB, then act locally
+  const handleStart = async () => {
+    await signal("start");
+    doStartRecording();
+  };
+  const handleStop = async () => {
+    await signal("stop");
+    doStopRecording();
   };
 
   const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   const qrUrl = origin ? `${origin}/session/${id}/record?side=${otherSide}` : "";
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-black flex flex-col">
       {/* Header */}
@@ -185,7 +200,9 @@ function RecordPageInner() {
         </div>
         <div className={cn(
           "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border",
-          peerConnected ? "bg-green-900/40 text-green-400 border-green-800/40" : "bg-gray-900 text-gray-600 border-gray-800"
+          peerConnected
+            ? "bg-green-900/40 text-green-400 border-green-800/40"
+            : "bg-gray-900 text-gray-600 border-gray-800"
         )}>
           <span className={cn("w-1.5 h-1.5 rounded-full", peerConnected ? "bg-green-500" : "bg-gray-700")} />
           <span className="capitalize">{otherSide}:</span>
@@ -193,7 +210,7 @@ function RecordPageInner() {
         </div>
       </div>
 
-      {/* Camera preview */}
+      {/* Camera */}
       <div className="relative flex-1 overflow-hidden bg-black">
         {!cameraReady && !cameraError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
@@ -204,26 +221,37 @@ function RecordPageInner() {
 
         <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
 
-        {/* QR overlay — shown until peer connects */}
-        {cameraReady && !peerConnected && phase === "ready" && (
-          <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-5 px-6">
+        {/* QR overlay — only on host phone, until peer connects */}
+        {cameraReady && isHost && !peerConnected && phase === "ready" && (
+          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-5 px-6">
             <div className="text-center">
-              <p className="text-white font-semibold text-base">Have the other phone scan this</p>
-              <p className="text-gray-400 text-sm mt-1 capitalize">{otherSide} camera · session {id.slice(0, 6)}</p>
+              <p className="text-white font-semibold text-base">
+                Have the <span className="capitalize">{otherSide}</span> camera phone scan this
+              </p>
+              <p className="text-gray-400 text-sm mt-1">Session {id.slice(0, 8)}</p>
             </div>
             {qrUrl ? (
               <div className="bg-white p-4 rounded-2xl">
                 <QRCodeSVG value={qrUrl} size={200} bgColor="#ffffff" fgColor="#000000" />
               </div>
             ) : <Loader2 className="text-white animate-spin" size={32} />}
-            <div className="flex items-center gap-2 text-gray-500 text-sm">
+            <div className="flex items-center gap-2 text-gray-400 text-sm">
               <Loader2 size={13} className="animate-spin" />
               <span>Waiting for {otherSide} camera…</span>
             </div>
           </div>
         )}
 
-        {/* Recording timer */}
+        {/* Non-host waiting screen (no QR) */}
+        {cameraReady && !isHost && !peerConnected && phase === "ready" && (
+          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-4 px-6">
+            <Loader2 className="text-green-400 animate-spin" size={40} />
+            <p className="text-white font-semibold">Linking with {otherSide} camera…</p>
+            <p className="text-gray-500 text-sm text-center">Hold on, connecting to the other phone.</p>
+          </div>
+        )}
+
+        {/* Timer */}
         {phase === "recording" && (
           <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/70 rounded-full px-4 py-2">
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
@@ -231,7 +259,7 @@ function RecordPageInner() {
           </div>
         )}
 
-        {/* Upload overlay */}
+        {/* Upload */}
         {phase === "uploading" && (
           <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center gap-4">
             <Upload size={40} className="text-green-400" />
@@ -243,7 +271,7 @@ function RecordPageInner() {
           </div>
         )}
 
-        {/* Done overlay */}
+        {/* Done */}
         {phase === "done" && (
           <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center gap-4">
             <CheckCircle2 size={48} className="text-green-400" />
@@ -264,22 +292,22 @@ function RecordPageInner() {
         {phase === "error" && uploadError && (
           <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center gap-3 p-6">
             <p className="text-red-400 font-semibold text-center">{uploadError}</p>
-            <button onClick={doUpload} className="bg-white text-black rounded-full px-6 py-2 text-sm font-medium">
-              Retry Upload
-            </button>
+            <button onClick={doUpload} className="bg-white text-black rounded-full px-6 py-2 text-sm font-medium mt-2">Retry</button>
           </div>
         )}
       </div>
 
-      {/* Bottom controls — only shown when both connected */}
-      <div className="px-6 pb-10 pt-4 bg-black shrink-0" style={{ minHeight: 100 }}>
+      {/* Controls */}
+      <div className="px-6 pb-10 pt-4 bg-black shrink-0 min-h-[100px] flex items-center">
         {!peerConnected && (
-          <p className="text-center text-gray-600 text-sm">Start button appears once both phones are linked.</p>
+          <p className="w-full text-center text-gray-600 text-sm">
+            {isHost ? "Start button appears once the other phone joins." : "Waiting for the other phone…"}
+          </p>
         )}
 
         {peerConnected && phase === "ready" && (
           <button
-            onClick={() => sendControl("start")}
+            onClick={handleStart}
             className="w-full bg-red-500 active:bg-red-700 text-white font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3"
           >
             <span className="w-5 h-5 rounded-full bg-white" />
@@ -289,7 +317,7 @@ function RecordPageInner() {
 
         {phase === "recording" && (
           <button
-            onClick={() => sendControl("stop")}
+            onClick={handleStop}
             className="w-full bg-white active:bg-gray-200 text-black font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3"
           >
             <span className="w-5 h-5 rounded-sm bg-black" />
