@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { Loader2, CheckCircle2, AlertCircle, Play, Download, Trophy, Film } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, Play, Download, Trophy, Film, QrCode } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { Session, Highlight } from "@/types/database";
 import { cn } from "@/lib/cn";
+import { QRCodeSVG } from "qrcode.react";
 
 interface SessionWithUrls extends Omit<Session, "highlights"> {
   urls?: {
@@ -134,6 +135,11 @@ export default function SessionPage() {
                 Stitching videos, running ball tracking, detecting highlights...
               </p>
             </div>
+          )}
+
+          {/* QR codes for phone recording */}
+          {(session.status === "created" || session.status === "uploading") && !isProcessing && (
+            <RecordingQRCodes sessionId={id} />
           )}
         </div>
       )}
@@ -272,6 +278,65 @@ export default function SessionPage() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+function RecordingQRCodes({ sessionId }: { sessionId: string }) {
+  const [origin, setOrigin] = useState("");
+  const [leftReady, setLeftReady] = useState(false);
+  const [rightReady, setRightReady] = useState(false);
+
+  useEffect(() => {
+    setOrigin(window.location.origin);
+
+    const channel = supabase
+      .channel(`recording:${sessionId}`)
+      .on("broadcast", { event: "state" }, ({ payload }) => {
+        if (payload.side === "left" && ["ready","recording","uploading","done"].includes(payload.status)) setLeftReady(true);
+        if (payload.side === "right" && ["ready","recording","uploading","done"].includes(payload.status)) setRightReady(true);
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [sessionId]);
+
+  if (!origin) return null;
+
+  const leftUrl  = `${origin}/session/${sessionId}/record?side=left`;
+  const rightUrl = `${origin}/session/${sessionId}/record?side=right`;
+
+  return (
+    <div className="mt-4 border-t border-green-900/40 pt-4">
+      <div className="flex items-center gap-2 mb-4">
+        <QrCode size={16} className="text-green-500" />
+        <p className="text-sm font-semibold text-green-300">Record from phones</p>
+        <span className="text-xs text-green-700 ml-auto">Scan with each phone's camera</span>
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        {(["left", "right"] as const).map((side) => {
+          const url   = side === "left" ? leftUrl : rightUrl;
+          const ready = side === "left" ? leftReady : rightReady;
+          return (
+            <div key={side} className="flex flex-col items-center gap-2">
+              <div className={cn(
+                "p-3 rounded-xl border transition-colors",
+                ready ? "border-green-500/60 bg-green-900/20" : "border-green-900/40 bg-black"
+              )}>
+                <QRCodeSVG value={url} size={120} bgColor="transparent" fgColor={ready ? "#4ade80" : "#ffffff"} />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className={cn("w-2 h-2 rounded-full", ready ? "bg-green-500" : "bg-gray-600")} />
+                <span className="text-xs font-medium capitalize text-green-300">{side} Camera</span>
+                {ready && <span className="text-xs text-green-500">· Connected</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-xs text-green-800 text-center mt-3">
+        Both phones must scan and connect before recording can start
+      </p>
     </div>
   );
 }
