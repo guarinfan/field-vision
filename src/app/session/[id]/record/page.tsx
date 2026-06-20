@@ -63,6 +63,8 @@ function RecordPageInner() {
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   const [phase, setPhase] = useState<Phase>("waiting-peer");
+  const phaseRef = useRef<Phase>("waiting-peer");
+  const setPhaseSync = (p: Phase) => { phaseRef.current = p; setPhase(p); };
   const [peerPhase, setPeerPhase] = useState<Phase | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -82,7 +84,7 @@ function RecordPageInner() {
 
   // Open camera with locked settings (identical on both phones)
   const openCamera = useCallback(async () => {
-    setPhase("opening-camera");
+    setPhaseSync("opening-camera");
     try {
       const stream = await navigator.mediaDevices.getUserMedia(SHARED_CAMERA_CONSTRAINTS);
       streamRef.current = stream;
@@ -101,11 +103,11 @@ function RecordPageInner() {
         videoRef.current.play();
       }
 
-      setPhase("ready");
+      setPhaseSync("ready");
       broadcast("ready");
     } catch (e: any) {
       setError(`Camera error: ${e.message}`);
-      setPhase("error");
+      setPhaseSync("error");
     }
   }, [broadcast]);
 
@@ -130,7 +132,7 @@ function RecordPageInner() {
     recorder.start(1000);
     recorderRef.current = recorder;
 
-    setPhase("recording");
+    setPhaseSync("recording");
     broadcast("recording");
     setRecordingSeconds(0);
     timerRef.current = setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
@@ -142,7 +144,7 @@ function RecordPageInner() {
   }, []);
 
   const uploadRecording = useCallback(async () => {
-    setPhase("uploading");
+    setPhaseSync("uploading");
     broadcast("uploading");
 
     const chunks = chunksRef.current;
@@ -176,11 +178,11 @@ function RecordPageInner() {
         body: JSON.stringify({ side }),
       });
 
-      setPhase("done");
+      setPhaseSync("done");
       broadcast("done");
     } catch (e: any) {
       setError(e.message);
-      setPhase("error");
+      setPhaseSync("error");
     }
   }, [id, side, broadcast]);
 
@@ -189,16 +191,16 @@ function RecordPageInner() {
     const channel = supabase
       .channel(`recording:${id}`)
       .on("broadcast", { event: "phase" }, ({ payload }) => {
-        if (payload.side !== side) {
-          setPeerPhase(payload.phase as Phase);
+        if (payload.side === side) return; // ignore own echo
+        const peerP = payload.phase as Phase;
+        setPeerPhase(peerP);
 
-          // Both phones open camera simultaneously when peer is also waiting
-          if (
-            payload.phase === "waiting-peer" &&
-            (phase === "waiting-peer")
-          ) {
-            openCamera();
-          }
+        // Re-broadcast our own current phase so a late-joining peer catches up
+        broadcast(phaseRef.current);
+
+        // If both are waiting → open cameras simultaneously
+        if (peerP === "waiting-peer" && phaseRef.current === "waiting-peer") {
+          openCamera();
         }
       })
       .on("broadcast", { event: "control" }, ({ payload }) => {
@@ -206,21 +208,16 @@ function RecordPageInner() {
         if (payload.action === "stop") stopRecording();
       })
       .subscribe(() => {
-        // Announce ourselves as waiting
+        // Announce ourselves; repeat a few times so the peer doesn't miss it
         broadcast("waiting-peer");
+        setTimeout(() => broadcast("waiting-peer"), 800);
+        setTimeout(() => broadcast("waiting-peer"), 2000);
       });
 
     channelRef.current = channel;
     return () => { supabase.removeChannel(channel); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  // When peer announces they're waiting and we're also waiting → open cameras
-  useEffect(() => {
-    if (peerPhase === "waiting-peer" && phase === "waiting-peer") {
-      openCamera();
-    }
-  }, [peerPhase, phase, openCamera]);
 
   const sendControl = (action: "start" | "stop") => {
     channelRef.current?.send({
