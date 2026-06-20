@@ -90,90 +90,130 @@ def _report(session_id: str, payload: dict) -> None:
 # Step 1 — Sync & Stitch
 # ---------------------------------------------------------------------------
 
-def _sample_brightness_ratio(left_path: Path, right_path: Path) -> tuple[float, float, float]:
-    """Sample mid-video frames and return per-channel (B,G,R) brightness ratio left/right."""
-    import cv2
-    cap_l = cv2.VideoCapture(str(left_path))
-    cap_r = cv2.VideoCapture(str(right_path))
-    total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
-    cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.5))
-    ret_l, fl = cap_l.read()
-    ret_r, fr = cap_r.read()
-    cap_l.release()
-    cap_r.release()
-    if not ret_l or not ret_r:
-        return 1.0, 1.0, 1.0
-    # Sample the inner 10% strip of each frame
-    w = fl.shape[1]
-    strip = max(1, int(w * 0.10))
-    ratios = []
-    for c in range(3):
-        lm = float(fl[:, w - strip:, c].mean())
-        rm = float(fr[:, :strip, c].mean())
-        ratios.append(max(0.5, min(2.0, lm / rm)) if rm > 2 else 1.0)
-    return ratios[0], ratios[1], ratios[2]
-
-
 def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
     """
-    Panoramic stitch using FFmpeg directly — single encode pass, full quality.
+    Panoramic stitch: Python-controlled crop + colour match + wide feather blend,
+    piped directly into FFmpeg h264 — single encode pass, no intermediate file.
 
-    Crops CROP_FRAC from the inner edge of each frame to remove the overlap zone,
-    applies per-channel brightness correction to the right camera, then hstacks.
-    No OpenCV VideoWriter → no intermediate lossy mp4v encode.
-
-    CROP_FRAC tuning: increase if you still see doubling, decrease if field is cut off.
+    LEFT_CROP  = fraction to drop from right edge of left frame
+    RIGHT_CROP = fraction to drop from left edge of right frame
+    FEATHER    = blend width in pixels at the seam (hides exposure difference)
     """
-    CROP_FRAC = 0.18  # fraction of inner edge to discard from each camera
+    import cv2
+    import numpy as np
 
-    # Get dimensions via ffprobe
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height",
-         "-of", "csv=p=0", str(left_path)],
-        capture_output=True, text=True, check=True,
-    )
-    w_str, h_str = probe.stdout.strip().split(",")
-    w, h = int(w_str), int(h_str)
-    crop_px = int(w * CROP_FRAC)
+    LEFT_CROP  = 0.15   # drop 15% from right edge of left camera
+    RIGHT_CROP = 0.22   # drop 22% from left edge of right camera
+    FEATHER    = 80     # pixel blend width at seam
 
-    # Compute brightness gain (left / right) per channel B,G,R
-    gb, gg, gr = _sample_brightness_ratio(left_path, right_path)
+    cap_l = cv2.VideoCapture(str(left_path))
+    cap_r = cv2.VideoCapture(str(right_path))
 
-    # Build FFmpeg filter:
-    # [0:v] crop right CROP_FRAC off → left panel
-    # [1:v] crop left CROP_FRAC off, apply brightness correction → right panel
-    # hstack the two panels
-    left_w  = w - crop_px
-    right_w = w - crop_px
+    fps   = cap_l.get(cv2.CAP_PROP_FPS) or 25.0
+    w_l   = int(cap_l.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_l   = int(cap_l.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w_r   = int(cap_r.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h_r   = int(cap_r.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # colorchannelmixer uses RGBA matrix; to scale each channel independently:
-    # r_out = rr*r_in, g_out = gg*g_in, b_out = bb*b_in
-    # FFmpeg uses BGR order but colorchannelmixer is RGB-named
-    eq_filter = (
-        f"colorchannelmixer="
-        f"rr={gr:.4f}:gg={gg:.4f}:bb={gb:.4f}"
-    )
+    # Normalise to left frame dimensions
+    W, H = w_l, h_l
 
-    filter_complex = (
-        f"[0:v]crop={left_w}:ih:0:0[left];"
-        f"[1:v]crop={right_w}:ih:{crop_px}:0,{eq_filter}[right];"
-        f"[left][right]hstack=inputs=2[v]"
-    )
+    def read_frame(cap):
+        ret, frame = cap.read()
+        if not ret:
+            return None
+        if frame.shape[1] != W or frame.shape[0] != H:
+            frame = cv2.resize(frame, (W, H), interpolation=cv2.INTER_LINEAR)
+        return frame
 
-    cmd = [
+    left_keep  = W - int(W * LEFT_CROP)   # columns kept from left frame
+    right_skip = int(W * RIGHT_CROP)       # columns skipped from right frame
+    right_keep = W - right_skip            # columns kept from right frame
+    out_w      = left_keep + right_keep
+    out_h      = H
+
+    # --- Colour calibration: affine match right→left per channel ---
+    total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
+    col_scale  = np.ones(3, dtype=np.float32)
+    col_offset = np.zeros(3, dtype=np.float32)
+    sample_count = 0
+    for pos in [0.3, 0.5, 0.7]:
+        cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
+        cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
+        fl = read_frame(cap_l)
+        fr = read_frame(cap_r)
+        if fl is None or fr is None:
+            continue
+        # Compare a 60px strip on each inner edge
+        s = 60
+        l_strip = fl[:, left_keep - s:left_keep].astype(np.float32)
+        r_strip = fr[:, right_skip:right_skip + s].astype(np.float32)
+        for c in range(3):
+            lm, ls = l_strip[:,:,c].mean(), l_strip[:,:,c].std() + 1e-6
+            rm, rs = r_strip[:,:,c].mean(), r_strip[:,:,c].std() + 1e-6
+            col_scale[c]  += ls / rs
+            col_offset[c] += lm - rm * (ls / rs)
+        sample_count += 1
+    if sample_count > 0:
+        col_scale  = np.clip(col_scale  / sample_count, 0.5, 2.0)
+        col_offset = np.clip(col_offset / sample_count, -60, 60)
+
+    cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Feather alpha: 1.0 (full left) → 0.0 (full right) over FEATHER pixels
+    feather_alpha = np.linspace(1.0, 0.0, FEATHER, dtype=np.float32)[np.newaxis, :]
+
+    # Pipe raw BGR frames into FFmpeg — single encode pass
+    ffmpeg_cmd = [
         "ffmpeg", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{out_w}x{out_h}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "pipe:0",
         "-i", str(left_path),
-        "-i", str(right_path),
-        "-filter_complex", filter_complex,
-        "-map", "[v]",
-        "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "17",
         "-c:a", "aac",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    enc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+
+    frame_idx = 0
+    total_f   = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
+    while True:
+        fl = read_frame(cap_l)
+        fr = read_frame(cap_r)
+        if fl is None or fr is None:
+            break
+
+        # Colour-correct right frame
+        fr_f = np.clip(
+            fr.astype(np.float32) * col_scale[np.newaxis, np.newaxis, :]
+            + col_offset[np.newaxis, np.newaxis, :],
+            0, 255
+        ).astype(np.uint8)
+
+        canvas = np.empty((out_h, out_w, 3), dtype=np.uint8)
+        # Solid left portion
+        canvas[:, :left_keep - FEATHER] = fl[:, :left_keep - FEATHER]
+        # Solid right portion
+        canvas[:, left_keep:] = fr_f[:, right_skip + FEATHER:]
+        # Feathered seam zone (FEATHER pixels wide)
+        f = FEATHER
+        lz = fl[:,  left_keep  - f : left_keep,       :].astype(np.float32)
+        rz = fr_f[:, right_skip    : right_skip + f,  :].astype(np.float32)
+        a  = feather_alpha[:, :, np.newaxis]
+        canvas[:, left_keep - f : left_keep, :] = (lz * a + rz * (1 - a)).astype(np.uint8)
+
+        enc.stdin.write(canvas.tobytes())
+        frame_idx += 1
+
+    cap_l.release()
+    cap_r.release()
+    enc.stdin.close()
+    enc.wait()
 
 
 # ---------------------------------------------------------------------------
