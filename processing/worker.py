@@ -219,7 +219,9 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         enc.stdin.close()
     except OSError:
         pass
-    _, stderr_bytes = enc.communicate()
+    # Read stderr and wait — do NOT use communicate() after manually closing stdin
+    stderr_bytes = enc.stderr.read()
+    enc.wait()
     if enc.returncode != 0 or pipe_broken:
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-3000:]
         raise RuntimeError(f"FFmpeg stitch failed after {frame_idx} frames (rc={enc.returncode}):\n{stderr_text}")
@@ -411,7 +413,8 @@ def run_tracking(input_path: Path, output_path: Path, session_id: str) -> list[d
         enc.stdin.close()
     except OSError:
         pass
-    _, stderr_bytes = enc.communicate()
+    stderr_bytes = enc.stderr.read()
+    enc.wait()
     if enc.returncode != 0:
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")[-3000:]
         raise RuntimeError(f"FFmpeg tracking failed after {frame_idx} frames (rc={enc.returncode}):\n{stderr_text}")
