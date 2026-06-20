@@ -213,10 +213,8 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
         if H_matrix is not None:
-            # Warp right frame onto canvas using homography
             warped_r = cv2.warpPerspective(frame_r, H_matrix, (out_w, out_h))
             canvas = warped_r.copy()
-            # Blend left frame over the canvas with gradient at seam
             for c in range(3):
                 canvas[:, :w, c] = (
                     frame_l[:, :w, c].astype(np.float32) * (1 - blend_mask[:, :w]) +
@@ -224,15 +222,22 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
                 ).astype(np.uint8)
             canvas[:, :w - overlap_px] = frame_l[:, :w - overlap_px]
         else:
-            # Fallback: gradient blend at center seam, no warp
+            # Simple robust fallback: left frame fills left side,
+            # right frame fills right side, gradient blend at seam
             canvas[:, :w] = frame_l
-            canvas[:, w - overlap_px:] = frame_r[:, :w + overlap_px] if frame_r.shape[1] >= w + overlap_px else np.pad(frame_r, ((0,0),(0, overlap_px),( 0,0)), mode='edge')[:, :w + overlap_px]
+
+            # Right portion of canvas starts at (w - overlap_px)
+            right_start = w - overlap_px
+            right_width = out_w - right_start  # = w
+            # Take first right_width columns of right frame
+            canvas[:, right_start:] = frame_r[:, :right_width]
+
+            # Gradient blend over the overlap zone
             for c in range(3):
-                seam_l = frame_l[:, w - overlap_px:w, c].astype(np.float32)
+                seam_l = frame_l[:, right_start:w, c].astype(np.float32)
                 seam_r = frame_r[:, :overlap_px, c].astype(np.float32)
-                alpha  = np.linspace(1, 0, overlap_px)[np.newaxis, :]
-                blended = (seam_l * alpha + seam_r * (1 - alpha)).astype(np.uint8)
-                canvas[:, w - overlap_px:w, c] = blended
+                alpha = np.linspace(1, 0, overlap_px, dtype=np.float32)[np.newaxis, :]
+                canvas[:, right_start:w, c] = (seam_l * alpha + seam_r * (1 - alpha)).astype(np.uint8)
 
         writer.write(canvas)
 
