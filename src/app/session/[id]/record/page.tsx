@@ -44,6 +44,8 @@ function RecordPageInner() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [showUploadPrompt, setShowUploadPrompt] = useState(false);
+  const pendingBlobRef = useRef<Blob | null>(null);
   const [origin, setOrigin] = useState("");
 
   useEffect(() => { setOrigin(window.location.origin); }, []);
@@ -133,7 +135,7 @@ function RecordPageInner() {
       : MediaRecorder.isTypeSupported("video/webm;codecs=h264") ? "video/webm;codecs=h264" : "video/webm";
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-    recorder.onstop = () => doUpload();
+    recorder.onstop = () => promptUpload();
     recorder.start(1000);
     recorderRef.current = recorder;
     setPhase("recording");
@@ -146,17 +148,27 @@ function RecordPageInner() {
     recorderRef.current?.stop();
   }, []);
 
-  const doUpload = useCallback(async () => {
-    setPhase("uploading");
+  const promptUpload = useCallback(() => {
     const chunks = chunksRef.current;
     if (!chunks.length) { setUploadError("No video recorded"); setPhase("error"); return; }
     const blob = new Blob(chunks, { type: chunks[0].type });
+    pendingBlobRef.current = blob;
+    setShowUploadPrompt(true);
+  }, []);
+
+  const doUpload = useCallback(async (blob?: Blob) => {
+    const uploadBlob = blob ?? pendingBlobRef.current;
+    setShowUploadPrompt(false);
+    setPhase("uploading");
+    if (!uploadBlob) { setUploadError("No video recorded"); setPhase("error"); return; }
     try {
       const res = await fetch("/api/upload", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: id, side }),
+        body: JSON.stringify({ session_id: id, camera: side }),
       });
+      if (!res.ok) throw new Error(`Upload URL failed: ${res.status}`);
       const { url } = await res.json();
+      if (!url) throw new Error("No upload URL returned");
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("PUT", url);
@@ -164,7 +176,7 @@ function RecordPageInner() {
         xhr.upload.onprogress = (e) => { if (e.lengthComputable) setUploadProgress(Math.round((e.loaded / e.total) * 100)); };
         xhr.onload = () => xhr.status < 300 ? resolve() : reject(new Error(`${xhr.status}`));
         xhr.onerror = () => reject(new Error("Upload error"));
-        xhr.send(blob);
+        xhr.send(uploadBlob);
       });
       await fetch(`/api/sessions/${id}/upload-done`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -256,6 +268,49 @@ function RecordPageInner() {
           <div className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/70 rounded-full px-4 py-2">
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             <span className="text-white font-mono text-lg">{fmt(recordingSeconds)}</span>
+          </div>
+        )}
+
+        {/* WiFi upload prompt */}
+        {showUploadPrompt && (
+          <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center gap-6 px-8">
+            <div className="text-center">
+              <p className="text-white text-xl font-bold mb-2">Ready to upload</p>
+              <p className="text-gray-400 text-sm leading-relaxed">
+                Your video is {Math.round((pendingBlobRef.current?.size ?? 0) / 1024 / 1024)} MB.{" "}
+                Upload now or wait until you're on WiFi to avoid using mobile data.
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 w-full">
+              <button
+                onClick={() => doUpload()}
+                className="w-full bg-green-500 active:bg-green-600 text-black font-bold py-4 rounded-2xl text-base"
+              >
+                Upload now
+              </button>
+              <button
+                onClick={() => setShowUploadPrompt(false)}
+                className="w-full bg-gray-800 active:bg-gray-700 text-gray-300 font-semibold py-4 rounded-2xl text-base"
+              >
+                Wait for WiFi
+              </button>
+            </div>
+            {/* If they dismiss and want to upload later */}
+            <p className="text-gray-600 text-xs text-center">
+              If you wait, keep this page open and tap Upload when ready.
+            </p>
+          </div>
+        )}
+
+        {/* Manual upload button shown after dismissing prompt */}
+        {!showUploadPrompt && phase === "ready" && pendingBlobRef.current && (
+          <div className="absolute bottom-0 left-0 right-0 bg-black/80 px-6 py-4">
+            <button
+              onClick={() => doUpload()}
+              className="w-full bg-green-500 text-black font-bold py-4 rounded-2xl text-base flex items-center justify-center gap-2"
+            >
+              <Upload size={18} /> Upload video now
+            </button>
           </div>
         )}
 
