@@ -472,11 +472,26 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
             _download(s3, right_key, right_path)
             print(f"Downloaded left:  {left_path.stat().st_size} bytes")
             print(f"Downloaded right: {right_path.stat().st_size} bytes")
+            # -- Transcode webm/VP9 → h264 so OpenCV can decode frames
             _report(session_id, {"status": "processing", "progress": 10})
+            left_h264  = tmp / "left_h264.mp4"
+            right_h264 = tmp / "right_h264.mp4"
+            for src, dst in [(left_path, left_h264), (right_path, right_h264)]:
+                r = subprocess.run(
+                    ["ffmpeg", "-y", "-i", str(src),
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-c:a", "aac", "-movflags", "+faststart", str(dst)],
+                    capture_output=True,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(f"Transcode failed for {src.name}:\n{r.stderr.decode(errors='replace')[-2000:]}")
+                print(f"Transcoded {src.name} → {dst.name} ({dst.stat().st_size} bytes)")
+
+            _report(session_id, {"status": "processing", "progress": 15})
 
             # -- Stitch
             stitched_path = tmp / "stitched.mp4"
-            sync_and_stitch(left_path, right_path, stitched_path)
+            sync_and_stitch(left_h264, right_h264, stitched_path)
             _report(session_id, {"status": "processing", "progress": 20})
 
             # -- Upload stitched panorama
