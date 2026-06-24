@@ -250,7 +250,7 @@ function RecordPageInner() {
         body: JSON.stringify({ session_id: id, camera: side, content_type: contentType }),
       });
       if (!res.ok) throw new Error(`Could not get upload URL (${res.status})`);
-      const { url } = await res.json();
+      const { url, key: uploadedKey } = await res.json();
       if (!url) throw new Error("No upload URL returned");
 
       // Upload to R2
@@ -269,11 +269,11 @@ function RecordPageInner() {
         xhr.send(blob);
       });
 
-      // Notify server both sides may be done
+      // Notify server this side's upload actually completed (pass key so DB is set only now)
       await fetch(`/api/sessions/${id}/upload-done`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ side }),
+        body: JSON.stringify({ side, key: uploadedKey }),
       });
 
       // Clean up saved blob

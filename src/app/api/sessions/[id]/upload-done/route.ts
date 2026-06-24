@@ -4,7 +4,7 @@ import { videoKey } from "@/lib/r2";
 import type { Session } from "@/types/database";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { side } = await req.json();
+  const { side, key: uploadedKey } = await req.json();
   const { id } = await params;
 
   if (side !== "left" && side !== "right") {
@@ -12,9 +12,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   }
 
   const field = side === "left" ? "left_video_key" : "right_video_key";
-  const key = videoKey(id, side);
+  // Use the key reported by the client (same key used for the presigned URL)
+  const key = uploadedKey || videoKey(id, side);
 
-  // Mark this side's key in the session row
+  // Mark this side as fully uploaded now that the PUT to R2 completed
   await supabaseAdmin.from("sessions").update({ [field]: key }).eq("id", id);
 
   // Check if both sides are now uploaded

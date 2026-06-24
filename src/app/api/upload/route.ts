@@ -12,11 +12,10 @@ export async function POST(req: NextRequest) {
   const key = videoKey(session_id, camera);
   const url = await getUploadUrl(key, content_type || "video/webm");
 
-  // Track which video key belongs to this camera
-  const field = camera === "left" ? "left_video_key" : "right_video_key";
+  // Only mark as uploading — the key is written to DB only after upload actually completes
   await supabaseAdmin
     .from("sessions")
-    .update({ [field]: key, status: "uploading" })
+    .update({ status: "uploading" })
     .eq("id", session_id);
 
   return NextResponse.json({ url, key });
