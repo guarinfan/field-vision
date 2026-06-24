@@ -348,25 +348,10 @@ function RecordPageInner() {
 
   // ── Main camera screen ────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-black flex flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 pt-4 pb-2 shrink-0">
-        <div>
-          <p className="text-xs text-gray-600 uppercase tracking-widest">FieldVision</p>
-          <h1 className="text-white font-bold text-lg capitalize">{side} Camera</h1>
-        </div>
-        <div className={cn(
-          "flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border",
-          peerConnected ? "bg-green-900/40 text-green-400 border-green-800/40" : "bg-gray-900 text-gray-600 border-gray-800"
-        )}>
-          <span className={cn("w-1.5 h-1.5 rounded-full", peerConnected ? "bg-green-500" : "bg-gray-700")} />
-          <span className="capitalize">{otherSide}:</span>
-          <span>{peerConnected ? "Connected" : "Waiting…"}</span>
-        </div>
-      </div>
-
-      {/* Camera */}
-      <div className="relative flex-1 overflow-hidden bg-black">
+    // fixed + inset-0 = true fullscreen, no scroll, no address-bar gap
+    <div className="fixed inset-0 bg-black overflow-hidden">
+      {/* Camera fills the entire viewport */}
+      <div className="absolute inset-0">
         {!cameraReady && !cameraError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
             <Loader2 className="text-green-400 animate-spin" size={36} />
@@ -433,33 +418,44 @@ function RecordPageInner() {
             <p className="text-gray-600 text-xs text-center">If you wait, reopen this page to upload. The video is saved to this browser.</p>
           </div>
         )}
-      </div>
 
-      {/* Controls */}
-      <div className="px-6 pb-10 pt-4 bg-black shrink-0 min-h-[100px] flex items-center">
-        {!peerConnected && phase === "ready" && (
-          <p className="w-full text-center text-gray-600 text-sm">
-            {isHost ? "Start button appears once the other phone joins." : "Waiting for the other phone…"}
-          </p>
-        )}
+        {/* Status pill — top left */}
+        <div className="absolute top-safe-or-4 top-4 left-4 flex items-center gap-2">
+          <div className={cn(
+            "flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium border backdrop-blur-sm",
+            peerConnected ? "bg-green-900/70 text-green-300 border-green-700/50" : "bg-black/60 text-gray-500 border-gray-700/50"
+          )}>
+            <span className={cn("w-1.5 h-1.5 rounded-full", peerConnected ? "bg-green-400" : "bg-gray-600")} />
+            <span className="capitalize">{side}</span>
+            <span className="text-gray-500 mx-0.5">·</span>
+            <span className="capitalize">{otherSide}:</span>
+            <span>{peerConnected ? "linked" : "waiting…"}</span>
+          </div>
+        </div>
 
-        {peerConnected && phase === "ready" && (
-          <button onClick={handleStart} className="w-full bg-red-500 active:bg-red-700 text-white font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3">
-            <span className="w-5 h-5 rounded-full bg-white" /> Start Recording
-          </button>
-        )}
-
-        {phase === "recording" && (
-          <button onClick={handleStop} className="w-full bg-white active:bg-gray-200 text-black font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3">
-            <span className="w-5 h-5 rounded-sm bg-black" /> Stop & Upload
-          </button>
-        )}
-
-        {phase === "stopped" && !showUploadPrompt && (
-          <button onClick={doUpload} className="w-full bg-green-500 text-black font-bold py-5 rounded-2xl text-lg flex items-center justify-center gap-2">
-            <Upload size={20} /> Upload now
-          </button>
-        )}
+        {/* Controls — floating bottom bar */}
+        <div className="absolute bottom-0 left-0 right-0 px-6 pb-10 pt-4">
+          {!peerConnected && phase === "ready" && (
+            <p className="w-full text-center text-gray-500 text-sm">
+              {isHost ? "Waiting for the other phone to scan the QR…" : "Waiting to link with the other phone…"}
+            </p>
+          )}
+          {peerConnected && phase === "ready" && (
+            <button onClick={handleStart} className="w-full bg-red-500 active:bg-red-700 text-white font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3 shadow-lg">
+              <span className="w-5 h-5 rounded-full bg-white" /> Start Recording
+            </button>
+          )}
+          {phase === "recording" && (
+            <button onClick={handleStop} className="w-full bg-white active:bg-gray-200 text-black font-bold py-5 rounded-2xl text-xl flex items-center justify-center gap-3 shadow-lg">
+              <span className="w-5 h-5 rounded-sm bg-black" /> Stop & Upload
+            </button>
+          )}
+          {phase === "stopped" && !showUploadPrompt && (
+            <button onClick={doUpload} className="w-full bg-green-500 text-black font-bold py-5 rounded-2xl text-lg flex items-center justify-center gap-2 shadow-lg">
+              <Upload size={20} /> Upload now
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
