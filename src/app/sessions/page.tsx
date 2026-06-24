@@ -5,11 +5,12 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import type { Session } from "@/types/database";
 import { cn } from "@/lib/cn";
-import { Plus, Film, Clock, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { Plus, Film, Clock, CheckCircle2, AlertCircle, Loader2, Trash2 } from "lucide-react";
 
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -23,6 +24,14 @@ export default function SessionsPage() {
     }
     load();
   }, []);
+
+  async function deleteSession(id: string) {
+    if (!confirm("Delete this session? This cannot be undone.")) return;
+    setDeleting(id);
+    await fetch(`/api/sessions/${id}`, { method: "DELETE" });
+    setSessions(s => s.filter(x => x.id !== id));
+    setDeleting(null);
+  }
 
   return (
     <div className="min-h-screen px-4 py-8 max-w-3xl mx-auto">
@@ -63,27 +72,36 @@ export default function SessionsPage() {
       {!loading && sessions.length > 0 && (
         <div className="flex flex-col gap-3">
           {sessions.map((s) => (
-            <Link
-              key={s.id}
-              href={`/session/${s.id}`}
-              className="flex items-center justify-between p-4 bg-green-950/30 border border-green-900/40 rounded-xl hover:border-green-700/50 transition-colors"
-            >
-              <div className="flex items-center gap-4">
-                <div className="bg-green-900/40 p-2.5 rounded-lg">
-                  <Film size={16} className="text-green-400" />
+            <div key={s.id} className="flex items-center gap-2">
+              <Link
+                href={`/session/${s.id}`}
+                className="flex-1 flex items-center justify-between p-4 bg-green-950/30 border border-green-900/40 rounded-xl hover:border-green-700/50 transition-colors"
+              >
+                <div className="flex items-center gap-4">
+                  <div className="bg-green-900/40 p-2.5 rounded-lg">
+                    <Film size={16} className="text-green-400" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-green-100 text-sm">
+                      {s.team_name || "Untitled Match"}
+                    </p>
+                    <p className="text-xs text-green-600 flex items-center gap-1.5 mt-0.5">
+                      <Clock size={10} />
+                      {s.match_date ?? new Date(s.created_at).toLocaleDateString()}
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <p className="font-semibold text-green-100 text-sm">
-                    {s.team_name || "Untitled Match"}
-                  </p>
-                  <p className="text-xs text-green-600 flex items-center gap-1.5 mt-0.5">
-                    <Clock size={10} />
-                    {s.match_date ?? new Date(s.created_at).toLocaleDateString()}
-                  </p>
-                </div>
-              </div>
-              <StatusPill status={s.status} progress={s.progress} />
-            </Link>
+                <StatusPill status={s.status} progress={s.progress} />
+              </Link>
+              <button
+                onClick={() => deleteSession(s.id)}
+                disabled={deleting === s.id}
+                className="p-3 rounded-xl border border-green-900/40 bg-green-950/30 hover:border-red-800/60 hover:bg-red-950/30 hover:text-red-400 text-green-700 transition-colors disabled:opacity-40"
+                title="Delete session"
+              >
+                {deleting === s.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+              </button>
+            </div>
           ))}
         </div>
       )}
