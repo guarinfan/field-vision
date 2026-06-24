@@ -104,7 +104,7 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
     LEFT_CROP  = 0.10   # drop 10% from right edge of left camera
     RIGHT_CROP = 0.22   # drop 22% from left edge of right camera
-    FEATHER    = 40     # pixel blend width at seam
+    FEATHER    = 300    # pixel blend width at seam (wider = smoother transition)
 
     cap_l = cv2.VideoCapture(str(left_path))
     cap_r = cv2.VideoCapture(str(right_path))
@@ -136,20 +136,21 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
 
     # --- Colour calibration: affine match right→left per channel ---
     total = int(cap_l.get(cv2.CAP_PROP_FRAME_COUNT))
-    col_scale  = np.ones(3, dtype=np.float32)
+    col_scale  = np.zeros(3, dtype=np.float32)
     col_offset = np.zeros(3, dtype=np.float32)
     sample_count = 0
-    for pos in [0.3, 0.5, 0.7]:
+    # Sample multiple positions and a wide strip for robust color match
+    for pos in [0.2, 0.35, 0.5, 0.65, 0.8]:
         cap_l.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
         cap_r.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
         fl = read_frame(cap_l)
         fr = read_frame(cap_r)
         if fl is None or fr is None:
             continue
-        # Compare a 60px strip on each inner edge
-        s = 60
-        l_strip = fl[:, left_keep - s:left_keep].astype(np.float32)
-        r_strip = fr[:, right_skip:right_skip + s].astype(np.float32)
+        # Use a wide strip (10% of width) at the inner edges
+        s = max(80, W // 10)
+        l_strip = fl[:, left_keep - s : left_keep].astype(np.float32)
+        r_strip = fr[:, right_skip   : right_skip + s].astype(np.float32)
         for c in range(3):
             lm, ls = l_strip[:,:,c].mean(), l_strip[:,:,c].std() + 1e-6
             rm, rs = r_strip[:,:,c].mean(), r_strip[:,:,c].std() + 1e-6
@@ -158,7 +159,10 @@ def sync_and_stitch(left_path: Path, right_path: Path, out_path: Path) -> None:
         sample_count += 1
     if sample_count > 0:
         col_scale  = np.clip(col_scale  / sample_count, 0.5, 2.0)
-        col_offset = np.clip(col_offset / sample_count, -60, 60)
+        col_offset = np.clip(col_offset / sample_count, -80, 80)
+    else:
+        col_scale = np.ones(3, dtype=np.float32)
+    print(f"Color calibration: scale={col_scale}, offset={col_offset}, samples={sample_count}")
 
     cap_l.set(cv2.CAP_PROP_POS_FRAMES, 0)
     cap_r.set(cv2.CAP_PROP_POS_FRAMES, 0)

@@ -49,9 +49,18 @@ async function idbDelete(key: string) {
   });
 }
 
-// ── Camera constraints (no exposure lock — causes dark image on some phones) ─
+// ── Camera constraints ──────────────────────────────────────────────────────
+// WB locked to daylight (5600K) so both phones match. Exposure left on auto
+// so neither phone goes dark. Advanced constraints are best-effort on mobile.
 const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
-  video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+  video: {
+    facingMode: "environment",
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
+    frameRate: { ideal: 30 },
+    // @ts-expect-error — advanced is not in lib.dom.d.ts but supported on Android/iOS
+    advanced: [{ whiteBalanceMode: "manual", colorTemperature: 5600 }],
+  },
   audio: true,
 };
 
