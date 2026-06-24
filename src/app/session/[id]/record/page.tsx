@@ -102,6 +102,12 @@ function RecordPageInner() {
 
   useEffect(() => { setOrigin(window.location.origin); }, []);
 
+  // Hide mobile browser address bar by nudging scroll on mount
+  useEffect(() => {
+    const t = setTimeout(() => window.scrollTo(0, 1), 100);
+    return () => clearTimeout(t);
+  }, []);
+
   // Check IndexedDB for a pending upload on mount (user reopened the page)
   useEffect(() => {
     idbLoad(idbKey).then(blob => {
