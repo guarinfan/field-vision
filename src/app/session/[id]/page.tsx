@@ -12,6 +12,8 @@ interface SessionWithUrls extends Omit<Session, "highlights"> {
   urls?: {
     stitched_video?: string;
     tracked_video?: string;
+    left_raw?: string;
+    right_raw?: string;
   };
   highlights?: (Highlight & { clip_url?: string })[] | null;
 }
@@ -277,6 +279,33 @@ export default function SessionPage() {
             </div>
           )}
         </>
+      )}
+
+      {/* Raw footage downloads — shown whenever either raw video exists */}
+      {(session.urls?.left_raw || session.urls?.right_raw) && (
+        <div className="mt-8 border border-green-900/40 rounded-2xl p-5">
+          <p className="text-xs font-semibold text-green-600 uppercase tracking-widest mb-4">Raw Footage</p>
+          <div className="flex flex-col sm:flex-row gap-3">
+            {session.urls?.left_raw && (
+              <a
+                href={session.urls.left_raw}
+                download
+                className="flex-1 flex items-center justify-center gap-2 bg-green-950/40 hover:bg-green-900/40 border border-green-800/40 hover:border-green-700/60 text-green-300 text-sm font-medium py-3 px-4 rounded-xl transition-colors"
+              >
+                <Download size={14} /> Left Camera
+              </a>
+            )}
+            {session.urls?.right_raw && (
+              <a
+                href={session.urls.right_raw}
+                download
+                className="flex-1 flex items-center justify-center gap-2 bg-green-950/40 hover:bg-green-900/40 border border-green-800/40 hover:border-green-700/60 text-green-300 text-sm font-medium py-3 px-4 rounded-xl transition-colors"
+              >
+                <Download size={14} /> Right Camera
+              </a>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -22,12 +22,10 @@ export async function GET(
   const session = data as unknown as Session;
   const urls: Record<string, string> = {};
 
-  if (session.stitched_video_key) {
-    urls.stitched_video = await getDownloadUrl(session.stitched_video_key);
-  }
-  if (session.tracked_video_key) {
-    urls.tracked_video = await getDownloadUrl(session.tracked_video_key);
-  }
+  if (session.stitched_video_key) urls.stitched_video = await getDownloadUrl(session.stitched_video_key);
+  if (session.tracked_video_key)  urls.tracked_video  = await getDownloadUrl(session.tracked_video_key);
+  if (session.left_video_key)     urls.left_raw        = await getDownloadUrl(session.left_video_key);
+  if (session.right_video_key)    urls.right_raw       = await getDownloadUrl(session.right_video_key);
   if (session.highlights) {
     const highlights = await Promise.all(
       session.highlights.map(async (h) => ({
