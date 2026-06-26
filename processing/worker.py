@@ -448,100 +448,116 @@ def cut_highlights(source: Path, events: list[dict], out_dir: Path) -> list[dict
 
 
 # ---------------------------------------------------------------------------
-# Main Modal function
+# Step A — CPU: download, transcode, stitch  (~$0.03/hr vs $0.59/hr for GPU)
 # ---------------------------------------------------------------------------
 
 @app.function(
     image=image,
     secrets=secrets,
-    gpu="T4",          # GPU for YOLO inference
-    timeout=10800,     # 3h max — full 90-min match can take 2h+ to process
+    cpu=4,
     memory=8192,
+    timeout=10800,
 )
-def process_session(session_id: str, left_key: str, right_key: str) -> None:
+def stitch_session(session_id: str, left_key: str, right_key: str) -> None:
     s3 = _r2_client()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-
         try:
-            # -- Download raw videos (use keys passed from DB, not reconstructed paths)
+            # -- Download
             _report(session_id, {"status": "processing", "progress": 5})
-            # Keep .mp4 extension — OpenCV/FFmpeg detect format by content, not extension
             left_path  = tmp / "left.mp4"
             right_path = tmp / "right.mp4"
             print(f"Downloading left:  {left_key}")
             print(f"Downloading right: {right_key}")
             _download(s3, left_key,  left_path)
             _download(s3, right_key, right_path)
-            print(f"Downloaded left:  {left_path.stat().st_size} bytes")
+            print(f"Downloaded  left: {left_path.stat().st_size} bytes")
             print(f"Downloaded right: {right_path.stat().st_size} bytes")
+
             # -- Transcode to h264 so OpenCV can decode frames
             _report(session_id, {"status": "processing", "progress": 10})
             left_h264  = tmp / "left_h264.mp4"
             right_h264 = tmp / "right_h264.mp4"
             for i, (src, dst) in enumerate([(left_path, left_h264), (right_path, right_h264)]):
                 print(f"Transcoding {src.name} ({src.stat().st_size} bytes)…")
-                # Detect container: webm needs stdin-pipe (no moov seek needed);
-                # mp4/H264 (iOS) must be read from file (moov atom at end requires seek)
                 with open(src, "rb") as fh:
                     magic = fh.read(12)
                 is_webm = magic[4:8] == b"webm" or magic[:4] == b"\x1a\x45\xdf\xa3"
-                print(f"  format detected: {'webm' if is_webm else 'mp4/other'}")
-
-                base_cmd = [
-                    "ffmpeg", "-y",
-                    "-fflags", "+discardcorrupt+genpts",
-                    "-threads", "0",
-                ]
-                encode_args = [
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-                    "-c:a", "aac", "-movflags", "+faststart", str(dst),
-                ]
+                print(f"  format: {'webm/VP9' if is_webm else 'mp4/H264'}")
+                base_cmd = ["ffmpeg", "-y", "-fflags", "+discardcorrupt+genpts", "-threads", "0"]
+                enc_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                            "-c:a", "aac", "-movflags", "+faststart", str(dst)]
                 try:
                     if is_webm:
-                        # Stream via stdin — avoids FFmpeg hanging on missing end-of-stream
                         with open(src, "rb") as f_in:
-                            r = subprocess.run(
-                                base_cmd + ["-f", "webm", "-i", "pipe:0"] + encode_args,
-                                stdin=f_in, capture_output=True, timeout=1800,
-                            )
+                            r = subprocess.run(base_cmd + ["-f", "webm", "-i", "pipe:0"] + enc_args,
+                                               stdin=f_in, capture_output=True, timeout=1800)
                     else:
-                        # mp4/H264 from iOS — read from file (needs moov seek)
-                        r = subprocess.run(
-                            base_cmd + ["-i", str(src)] + encode_args,
-                            capture_output=True, timeout=1800,
-                        )
+                        r = subprocess.run(base_cmd + ["-i", str(src)] + enc_args,
+                                           capture_output=True, timeout=1800)
                 except subprocess.TimeoutExpired:
-                    raise RuntimeError(f"Transcode timed out after 30 min for {src.name}")
+                    raise RuntimeError(f"Transcode timed out for {src.name}")
                 if r.returncode != 0:
-                    stderr_txt = r.stderr.decode(errors="replace")[-3000:]
-                    raise RuntimeError(f"Transcode failed for {src.name} (rc={r.returncode}):\n{stderr_txt}")
+                    raise RuntimeError(f"Transcode failed {src.name} (rc={r.returncode}):\n"
+                                       + r.stderr.decode(errors="replace")[-3000:])
                 print(f"Transcoded → {dst.name} ({dst.stat().st_size} bytes)")
                 _report(session_id, {"status": "processing", "progress": 11 + i * 3})
 
-            _report(session_id, {"status": "processing", "progress": 15})
-
             # -- Stitch
+            _report(session_id, {"status": "processing", "progress": 15})
             stitched_path = tmp / "stitched.mp4"
             sync_and_stitch(left_h264, right_h264, stitched_path)
-            _report(session_id, {"status": "processing", "progress": 20})
 
             # -- Upload stitched panorama
+            _report(session_id, {"status": "processing", "progress": 40})
             stitched_key = f"sessions/{session_id}/output/stitched.mp4"
             _upload(s3, stitched_path, stitched_key)
+            print(f"Uploaded stitched: {stitched_key}")
+
+            # -- Hand off to GPU function for tracking
+            _report(session_id, {"status": "processing", "progress": 45})
+            track_session.spawn(session_id, stitched_key)
+
+        except Exception as exc:
+            _report(session_id, {"status": "error", "error_message": str(exc)})
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Step B — GPU: download stitched, YOLO tracking, highlights, upload
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    secrets=secrets,
+    gpu="T4",
+    memory=8192,
+    timeout=7200,
+)
+def track_session(session_id: str, stitched_key: str) -> None:
+    s3 = _r2_client()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        try:
+            # -- Download stitched video
+            _report(session_id, {"status": "processing", "progress": 50})
+            stitched_path = tmp / "stitched.mp4"
+            print(f"Downloading stitched: {stitched_key}")
+            _download(s3, stitched_key, stitched_path)
 
             # -- Ball/player tracking + auto-zoom
             tracked_path = tmp / "tracked.mp4"
             goal_events = run_tracking(stitched_path, tracked_path, session_id)
-            _report(session_id, {"status": "processing", "progress": 80})
+            _report(session_id, {"status": "processing", "progress": 85})
 
             # -- Upload tracked video
             tracked_key = f"sessions/{session_id}/output/tracked.mp4"
             _upload(s3, tracked_path, tracked_key)
-            _report(session_id, {"status": "processing", "progress": 88})
 
             # -- Cut & upload highlight clips
+            _report(session_id, {"status": "processing", "progress": 90})
             highlights = []
             if goal_events:
                 clips_dir = tmp / "clips"
@@ -558,8 +574,6 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
                     })
 
             _report(session_id, {"status": "processing", "progress": 95})
-
-            # -- Done
             _report(session_id, {
                 "status": "done",
                 "progress": 100,
@@ -569,10 +583,7 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
             })
 
         except Exception as exc:
-            _report(session_id, {
-                "status": "error",
-                "error_message": str(exc),
-            })
+            _report(session_id, {"status": "error", "error_message": str(exc)})
             raise
 
 
@@ -595,5 +606,5 @@ def process(body: dict) -> dict:
     left_key  = body.get("left_key",  f"sessions/{session_id}/raw/left.mp4")
     right_key = body.get("right_key", f"sessions/{session_id}/raw/right.mp4")
 
-    process_session.spawn(session_id, left_key, right_key)
+    stitch_session.spawn(session_id, left_key, right_key)
     return {"jobId": f"modal-{session_id}", "ok": True}
