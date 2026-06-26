@@ -477,27 +477,32 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
             print(f"Downloaded left:  {left_path.stat().st_size} bytes")
             print(f"Downloaded right: {right_path.stat().st_size} bytes")
             # -- Transcode webm/VP9 → h264 so OpenCV can decode frames
+            # Pipe file via stdin to avoid FFmpeg hanging on fragmented/incomplete
+            # webm containers that lack end-of-stream markers (common from MediaRecorder)
             _report(session_id, {"status": "processing", "progress": 10})
             left_h264  = tmp / "left_h264.mp4"
             right_h264 = tmp / "right_h264.mp4"
             for i, (src, dst) in enumerate([(left_path, left_h264), (right_path, right_h264)]):
                 print(f"Transcoding {src.name} ({src.stat().st_size} bytes)…")
                 try:
-                    r = subprocess.run(
-                        ["ffmpeg", "-y",
-                         "-threads", "0",          # use all CPU cores
-                         "-i", str(src),
-                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-                         "-c:a", "aac", "-movflags", "+faststart", str(dst)],
-                        capture_output=True,
-                        timeout=1800,              # 30 min cap per file
-                    )
+                    with open(src, "rb") as f_in:
+                        r = subprocess.run(
+                            ["ffmpeg", "-y",
+                             "-fflags", "+discardcorrupt+genpts",
+                             "-threads", "0",
+                             "-i", "pipe:0",       # read from stdin — no seeking, works for fragmented webm
+                             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                             "-c:a", "aac", "-movflags", "+faststart", str(dst)],
+                            stdin=f_in,
+                            capture_output=True,
+                            timeout=1800,
+                        )
                 except subprocess.TimeoutExpired:
                     raise RuntimeError(f"Transcode timed out after 30 min for {src.name}")
                 if r.returncode != 0:
-                    raise RuntimeError(f"Transcode failed for {src.name}:\n{r.stderr.decode(errors='replace')[-2000:]}")
+                    stderr_txt = r.stderr.decode(errors="replace")[-3000:]
+                    raise RuntimeError(f"Transcode failed for {src.name} (rc={r.returncode}):\n{stderr_txt}")
                 print(f"Transcoded {src.name} → {dst.name} ({dst.stat().st_size} bytes)")
-                # Report 11% after left, 14% after right so UI shows movement
                 _report(session_id, {"status": "processing", "progress": 11 + i * 3})
 
             _report(session_id, {"status": "processing", "progress": 15})
