@@ -480,16 +480,25 @@ def process_session(session_id: str, left_key: str, right_key: str) -> None:
             _report(session_id, {"status": "processing", "progress": 10})
             left_h264  = tmp / "left_h264.mp4"
             right_h264 = tmp / "right_h264.mp4"
-            for src, dst in [(left_path, left_h264), (right_path, right_h264)]:
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-i", str(src),
-                     "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                     "-c:a", "aac", "-movflags", "+faststart", str(dst)],
-                    capture_output=True,
-                )
+            for i, (src, dst) in enumerate([(left_path, left_h264), (right_path, right_h264)]):
+                print(f"Transcoding {src.name} ({src.stat().st_size} bytes)…")
+                try:
+                    r = subprocess.run(
+                        ["ffmpeg", "-y",
+                         "-threads", "0",          # use all CPU cores
+                         "-i", str(src),
+                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                         "-c:a", "aac", "-movflags", "+faststart", str(dst)],
+                        capture_output=True,
+                        timeout=1800,              # 30 min cap per file
+                    )
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError(f"Transcode timed out after 30 min for {src.name}")
                 if r.returncode != 0:
                     raise RuntimeError(f"Transcode failed for {src.name}:\n{r.stderr.decode(errors='replace')[-2000:]}")
                 print(f"Transcoded {src.name} → {dst.name} ({dst.stat().st_size} bytes)")
+                # Report 11% after left, 14% after right so UI shows movement
+                _report(session_id, {"status": "processing", "progress": 11 + i * 3})
 
             _report(session_id, {"status": "processing", "progress": 15})
 
