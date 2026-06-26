@@ -455,7 +455,7 @@ def cut_highlights(source: Path, events: list[dict], out_dir: Path) -> list[dict
     image=image,
     secrets=secrets,
     gpu="T4",          # GPU for YOLO inference
-    timeout=3600,      # 1h max
+    timeout=10800,     # 3h max — full 90-min match can take 2h+ to process
     memory=8192,
 )
 def process_session(session_id: str, left_key: str, right_key: str) -> None:

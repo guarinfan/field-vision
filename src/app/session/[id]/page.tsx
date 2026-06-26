@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { Loader2, CheckCircle2, AlertCircle, Play, Download, Trophy, Film, QrCode } from "lucide-react";
+import { Loader2, CheckCircle2, AlertCircle, Play, Download, Trophy, Film, QrCode, RefreshCw } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import type { Session, Highlight } from "@/types/database";
 import { cn } from "@/lib/cn";
@@ -32,6 +32,14 @@ export default function SessionPage() {
   const [session, setSession] = useState<SessionWithUrls | null>(null);
   const [activeTab, setActiveTab] = useState<"panoramic" | "tracked" | "highlights">("panoramic");
   const [activeHighlight, setActiveHighlight] = useState<number>(0);
+  const [retrying, setRetrying] = useState(false);
+
+  async function retryProcessing() {
+    setRetrying(true);
+    await fetch(`/api/sessions/${id}/retry`, { method: "POST" });
+    await fetchSession();
+    setRetrying(false);
+  }
 
   const fetchSession = useCallback(async () => {
     const res = await fetch(`/api/sessions/${id}`);
@@ -146,14 +154,38 @@ export default function SessionPage() {
         </div>
       )}
 
-      {/* Error state */}
+      {/* Error / stuck state */}
       {isError && (
         <div className="bg-red-950/30 border border-red-800/40 rounded-2xl p-6 mb-8 flex items-start gap-3">
           <AlertCircle size={20} className="text-red-400 mt-0.5 shrink-0" />
-          <div>
+          <div className="flex-1">
             <p className="font-semibold text-red-300">Processing failed</p>
             <p className="text-sm text-red-400/70 mt-1">{session.error_message || "An unknown error occurred."}</p>
           </div>
+          {(session.left_video_key && session.right_video_key) && (
+            <button
+              onClick={retryProcessing}
+              disabled={retrying}
+              className="flex items-center gap-2 bg-red-900/40 hover:bg-red-800/50 border border-red-700/40 text-red-300 text-sm font-medium px-4 py-2 rounded-xl transition-colors disabled:opacity-50 shrink-0"
+            >
+              {retrying ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Stuck at processing — show retry if no progress for a long time */}
+      {isProcessing && session.left_video_key && session.right_video_key && (
+        <div className="flex justify-end mb-2">
+          <button
+            onClick={retryProcessing}
+            disabled={retrying}
+            className="flex items-center gap-2 text-yellow-600 hover:text-yellow-400 text-xs font-medium transition-colors disabled:opacity-50"
+          >
+            {retrying ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            Restart processing
+          </button>
         </div>
       )}
 
