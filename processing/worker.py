@@ -428,7 +428,7 @@ def stitch_session(session_id: str, left_key: str, right_key: str) -> None:
                 is_webm = magic[4:8] == b"webm" or magic[:4] == b"\x1a\x45\xdf\xa3"
                 print(f"  format: {'webm/VP9' if is_webm else 'mp4/H264'}")
                 base_cmd = ["ffmpeg", "-y", "-fflags", "+discardcorrupt+genpts", "-threads", "0"]
-                enc_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+                enc_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "28",
                             "-c:a", "aac", "-movflags", "+faststart", str(dst)]
                 try:
                     if is_webm:
