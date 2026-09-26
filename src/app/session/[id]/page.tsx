@@ -375,31 +375,38 @@ export default function SessionPage() {
 
 function RecordingQRCodes({ sessionId }: { sessionId: string }) {
   const [origin, setOrigin] = useState("");
-
   useEffect(() => { setOrigin(window.location.origin); }, []);
-
   if (!origin) return null;
 
-  // Single QR — left phone scans this, picks "LEFT", then shows its own QR for the right phone.
-  const recordUrl = `${origin}/session/${sessionId}/record`;
+  const controlUrl = `${origin}/session/${sessionId}/control`;
+  const recordUrl  = `${origin}/session/${sessionId}/record`;
 
   return (
     <div className="mt-4 border-t border-green-900/40 pt-4">
       <div className="flex items-center gap-2 mb-4">
         <QrCode size={16} className="text-green-500" />
-        <p className="text-sm font-semibold text-green-300">Sync &amp; Record</p>
+        <p className="text-sm font-semibold text-green-300">3-Phone Recording Setup</p>
       </div>
-      <div className="flex flex-col items-center gap-3">
-        <div className="bg-white p-3 rounded-xl">
-          <QRCodeSVG value={recordUrl} size={160} bgColor="#ffffff" fgColor="#000000" />
+
+      {/* Coordinator QR */}
+      <div className="mb-4">
+        <p className="text-xs text-green-600 font-semibold uppercase tracking-widest mb-2 text-center">Phone 3 — Coordinator</p>
+        <div className="flex flex-col items-center gap-2">
+          <div className="bg-white p-3 rounded-xl">
+            <QRCodeSVG value={controlUrl} size={140} bgColor="#ffffff" fgColor="#000000" />
+          </div>
+          <p className="text-xs text-gray-500 text-center">Opens the Start/Stop control panel</p>
         </div>
-        <p className="text-xs text-green-600 font-semibold text-center uppercase tracking-widest">Step 1 — LEFT phone scans this</p>
-        <div className="w-full bg-green-950/40 border border-green-900/30 rounded-xl p-4 text-sm text-gray-400 space-y-1.5">
-          <p>1. LEFT phone scans the QR above → selects "LEFT camera"</p>
-          <p>2. LEFT phone shows a second QR → RIGHT phone scans it</p>
-          <p>3. Both phones show a 3-minute countdown</p>
-          <p>4. Elevate tripod, lock cameras → recording starts automatically</p>
-          <p>5. Recording auto-stops after 3 minutes → upload to site</p>
+      </div>
+
+      {/* Camera phones QR */}
+      <div>
+        <p className="text-xs text-green-600 font-semibold uppercase tracking-widest mb-2 text-center">Phones 1 &amp; 2 — Cameras</p>
+        <div className="flex flex-col items-center gap-2">
+          <div className="bg-white p-3 rounded-xl">
+            <QRCodeSVG value={recordUrl} size={140} bgColor="#ffffff" fgColor="#000000" />
+          </div>
+          <p className="text-xs text-gray-500 text-center">Both camera phones scan this, then pick LEFT or RIGHT</p>
         </div>
       </div>
     </div>

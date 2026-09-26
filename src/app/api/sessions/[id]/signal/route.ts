@@ -1,21 +1,20 @@
 /**
- * Phone-to-phone signaling via DB bitmask + sync timestamp.
+ * Phone-to-phone signaling for 3-phone recording system.
  *
- * `progress` bitmask (bits 0-3):
- *   bit 0 (1)  — left phone connected
- *   bit 1 (2)  — right phone connected
- *   bit 2 (4)  — start recording signal (legacy manual start)
- *   bit 3 (8)  — stop recording signal  (legacy manual stop)
+ * `progress` bitmask (bits 0-1):
+ *   bit 0 (1)  — left camera phone connected
+ *   bit 1 (2)  — right camera phone connected
  *
- * `error_message` is borrowed during recording phase (before processing starts)
- * to store the auto-sync countdown timestamp as JSON: {"_sync":{"start_at":ms}}
- * It is overwritten by real errors only after status becomes "processing".
+ * `error_message` is borrowed during recording phase to store sync state:
+ *   {"_sync": {"start_at": <unix ms + 3s buffer>, "stopped": true|false}}
+ *
+ * Overwritten by real error strings only after status becomes "processing".
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
 
-const COUNTDOWN_MS = 3 * 60 * 1000; // 3 minutes
+const START_BUFFER_MS = 3000; // cameras get 3 s advance notice before recording starts
 
 async function getRow(id: string) {
   const { data } = await supabaseAdmin
@@ -26,42 +25,41 @@ async function getRow(id: string) {
   return data as { progress: number; error_message: string | null } | null;
 }
 
-async function setProgressBit(id: string, bit: number) {
+function parseSync(msg: string | null): Record<string, unknown> {
+  try {
+    if (msg?.startsWith('{"_sync":')) return (JSON.parse(msg)._sync as Record<string, unknown>) ?? {};
+  } catch { /* ignore */ }
+  return {};
+}
+
+async function writeSync(id: string, patch: Record<string, unknown>) {
   const row = await getRow(id);
-  const current = row?.progress ?? 0;
+  const existing = parseSync(row?.error_message ?? null);
   await supabaseAdmin
     .from("sessions")
-    .update({ progress: current | bit })
+    .update({ error_message: JSON.stringify({ _sync: { ...existing, ...patch } }) })
     .eq("id", id);
 }
 
-// GET — poll for current sync state
+// GET — poll current sync state
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const row = await getRow(id);
-  const p = row?.progress ?? 0;
-
-  let syncStartAt: number | null = null;
-  try {
-    const msg = row?.error_message ?? "";
-    if (msg.startsWith('{"_sync":')) {
-      syncStartAt = JSON.parse(msg)._sync?.start_at ?? null;
-    }
-  } catch { /* ignore */ }
+  const row  = await getRow(id);
+  const p    = row?.progress ?? 0;
+  const sync = parseSync(row?.error_message ?? null);
 
   return NextResponse.json({
     leftConnected:  Boolean(p & 1),
     rightConnected: Boolean(p & 2),
-    startSignal:    Boolean(p & 4),
-    stopSignal:     Boolean(p & 8),
-    syncStartAt,
+    startAt:        (sync.start_at as number) ?? null,   // unix ms when recording should start
+    stopped:        Boolean(sync.stopped),
   });
 }
 
-// POST — set a signal bit or write the sync countdown timestamp
+// POST — signal actions from coordinator or camera phones
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -70,36 +68,24 @@ export async function POST(
   const { action, side } = await req.json();
 
   if (action === "connect") {
-    await setProgressBit(id, side === "left" ? 1 : 2);
-  } else if (action === "sync_start") {
-    // Left (coordinator) phone calls this once both are connected.
-    // Stores start_at = now + 3 min so both phones can count down to the same moment.
-    const start_at = Date.now() + COUNTDOWN_MS;
-    await supabaseAdmin
-      .from("sessions")
-      .update({ error_message: JSON.stringify({ _sync: { start_at } }) })
-      .eq("id", id);
-  } else if (action === "start") {
-    await setProgressBit(id, 4);
-  } else if (action === "stop") {
-    await setProgressBit(id, 8);
-  } else if (action === "reset") {
-    const row = await getRow(id);
+    const row     = await getRow(id);
     const current = row?.progress ?? 0;
+    const bit     = side === "left" ? 1 : 2;
+    await supabaseAdmin.from("sessions").update({ progress: current | bit }).eq("id", id);
+
+  } else if (action === "start") {
+    // Coordinator hits Start — give cameras a 3 s head-start to see the signal
+    await writeSync(id, { start_at: Date.now() + START_BUFFER_MS, stopped: false });
+
+  } else if (action === "stop") {
+    await writeSync(id, { stopped: true });
+
+  } else if (action === "reset") {
+    // Clear all state for a fresh recording attempt
     await supabaseAdmin
       .from("sessions")
-      .update({ progress: current & ~12 }) // clear bits 2 and 3
+      .update({ progress: 0, error_message: null })
       .eq("id", id);
-  } else if (action === "clear_sync") {
-    // Called after recording starts to clean up borrowed error_message field
-    const row = await getRow(id);
-    const msg = row?.error_message ?? "";
-    if (msg.startsWith('{"_sync":')) {
-      await supabaseAdmin
-        .from("sessions")
-        .update({ error_message: null })
-        .eq("id", id);
-    }
   }
 
   return NextResponse.json({ ok: true });
