@@ -375,59 +375,33 @@ export default function SessionPage() {
 
 function RecordingQRCodes({ sessionId }: { sessionId: string }) {
   const [origin, setOrigin] = useState("");
-  const [leftReady, setLeftReady] = useState(false);
-  const [rightReady, setRightReady] = useState(false);
 
-  useEffect(() => {
-    setOrigin(window.location.origin);
-
-    const channel = supabase
-      .channel(`recording:${sessionId}`)
-      .on("broadcast", { event: "state" }, ({ payload }) => {
-        if (payload.side === "left" && ["ready","recording","uploading","done"].includes(payload.status)) setLeftReady(true);
-        if (payload.side === "right" && ["ready","recording","uploading","done"].includes(payload.status)) setRightReady(true);
-      })
-      .subscribe();
-
-    return () => { supabase.removeChannel(channel); };
-  }, [sessionId]);
+  useEffect(() => { setOrigin(window.location.origin); }, []);
 
   if (!origin) return null;
 
-  const leftUrl  = `${origin}/session/${sessionId}/record?side=left`;
-  const rightUrl = `${origin}/session/${sessionId}/record?side=right`;
+  // Single QR — left phone scans this, picks "LEFT", then shows its own QR for the right phone.
+  const recordUrl = `${origin}/session/${sessionId}/record`;
 
   return (
     <div className="mt-4 border-t border-green-900/40 pt-4">
       <div className="flex items-center gap-2 mb-4">
         <QrCode size={16} className="text-green-500" />
-        <p className="text-sm font-semibold text-green-300">Record from phones</p>
-        <span className="text-xs text-green-700 ml-auto">Scan with each phone's camera</span>
+        <p className="text-sm font-semibold text-green-300">Sync &amp; Record</p>
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        {(["left", "right"] as const).map((side) => {
-          const url   = side === "left" ? leftUrl : rightUrl;
-          const ready = side === "left" ? leftReady : rightReady;
-          return (
-            <div key={side} className="flex flex-col items-center gap-2">
-              <div className={cn(
-                "p-3 rounded-xl border transition-colors",
-                ready ? "border-green-500/60 bg-green-900/20" : "border-green-900/40 bg-black"
-              )}>
-                <QRCodeSVG value={url} size={120} bgColor="transparent" fgColor={ready ? "#4ade80" : "#ffffff"} />
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className={cn("w-2 h-2 rounded-full", ready ? "bg-green-500" : "bg-gray-600")} />
-                <span className="text-xs font-medium capitalize text-green-300">{side} Camera</span>
-                {ready && <span className="text-xs text-green-500">· Connected</span>}
-              </div>
-            </div>
-          );
-        })}
+      <div className="flex flex-col items-center gap-3">
+        <div className="bg-white p-3 rounded-xl">
+          <QRCodeSVG value={recordUrl} size={160} bgColor="#ffffff" fgColor="#000000" />
+        </div>
+        <p className="text-xs text-green-600 font-semibold text-center uppercase tracking-widest">Step 1 — LEFT phone scans this</p>
+        <div className="w-full bg-green-950/40 border border-green-900/30 rounded-xl p-4 text-sm text-gray-400 space-y-1.5">
+          <p>1. LEFT phone scans the QR above → selects "LEFT camera"</p>
+          <p>2. LEFT phone shows a second QR → RIGHT phone scans it</p>
+          <p>3. Both phones show a 3-minute countdown</p>
+          <p>4. Elevate tripod, lock cameras → recording starts automatically</p>
+          <p>5. Recording auto-stops after 3 minutes → upload to site</p>
+        </div>
       </div>
-      <p className="text-xs text-green-800 text-center mt-3">
-        Both phones must scan and connect before recording can start
-      </p>
     </div>
   );
 }
