@@ -8,6 +8,7 @@ import { QRCodeSVG } from "qrcode.react";
 
 type Side  = "left" | "right";
 type Phase = "selecting" | "ready" | "recording" | "stopped" | "uploading" | "done" | "error";
+// "selecting" still shows the camera underneath with a modal overlay
 
 const POLL_MS = 1000;
 
@@ -139,9 +140,10 @@ function RecordPageInner() {
     }).catch(() => {});
   }, [idbKey]);
 
-  // ── Camera ───────────────────────────────────────────────────────────────
+  // ── Camera — starts immediately (even during side selection) ────────────
   useEffect(() => {
-    if (!side || hasSavedBlob) return;
+    if (hasSavedBlob) return;
+    // We open the camera before side is picked so it's already live when the picker dismisses
     let active = true;
     (async () => {
       try {
@@ -155,7 +157,7 @@ function RecordPageInner() {
       }
     })();
     return () => { active = false; streamRef.current?.getTracks().forEach(t => t.stop()); };
-  }, [side, hasSavedBlob]);
+  }, [hasSavedBlob]);
 
   // ── Announce connection ───────────────────────────────────────────────────
   useEffect(() => {
@@ -305,22 +307,6 @@ function RecordPageInner() {
     }
   }, [idbKey, id, side]);
 
-  // ── SCREEN: Side picker ───────────────────────────────────────────────────
-  if (phase === "selecting") {
-    return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-6 px-8">
-        <div className="text-center mb-2">
-          <p className="text-xs text-green-600 uppercase tracking-widest font-semibold mb-2">FieldVision · Camera Setup</p>
-          <h1 className="text-white text-2xl font-bold">Which side are you?</h1>
-          <p className="text-gray-500 text-sm mt-2">Select your position on the field</p>
-        </div>
-        <button onClick={() => { setSide("left");  setPhase("ready"); }} className="w-full bg-green-500 active:bg-green-600 text-black font-bold py-6 rounded-2xl text-xl">◀ LEFT camera</button>
-        <button onClick={() => { setSide("right"); setPhase("ready"); }} className="w-full bg-white active:bg-gray-200 text-black font-bold py-6 rounded-2xl text-xl">RIGHT camera ▶</button>
-        <p className="text-gray-600 text-xs text-center mt-1">The coordinator phone controls when recording starts and stops.</p>
-      </div>
-    );
-  }
-
   // ── SCREEN: Saved blob resume ─────────────────────────────────────────────
   if (hasSavedBlob && phase !== "uploading" && phase !== "done") {
     return (
@@ -349,10 +335,10 @@ function RecordPageInner() {
     );
   }
 
-  // ── SCREEN: Camera + live phases ──────────────────────────────────────────
+  // ── SCREEN: Camera + all live phases (selecting / ready / recording / stopped)
   return (
     <div className="fixed inset-0 bg-black overflow-hidden">
-      {/* Camera preview */}
+      {/* Camera preview — always behind everything */}
       <div className="absolute inset-0">
         {!cameraReady && !cameraError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 z-10">
@@ -363,16 +349,44 @@ function RecordPageInner() {
         <video ref={videoRef} className="w-full h-full object-cover" muted playsInline autoPlay />
       </div>
 
+      {/* ── Bottom sheet: side picker (shown on top of camera) ───────────── */}
+      {phase === "selecting" && (
+        <div className="absolute inset-0 z-30 flex items-end justify-center">
+          <div className="absolute inset-0 bg-black/60" />
+          <div className="relative w-full max-w-sm bg-gray-950 border border-green-800/50 rounded-t-3xl px-6 pt-6 pb-10 z-10">
+            <div className="w-10 h-1 bg-gray-700 rounded-full mx-auto mb-6" />
+            <p className="text-xs text-green-600 uppercase tracking-widest font-semibold mb-1 text-center">FieldVision</p>
+            <h2 className="text-white text-xl font-bold text-center mb-1">Which side are you?</h2>
+            <p className="text-gray-600 text-sm text-center mb-6">Select your position on the field</p>
+            <div className="flex flex-col gap-3">
+              <button
+                onClick={() => { setSide("left");  setPhase("ready"); }}
+                className="w-full bg-green-500 active:bg-green-600 text-black font-bold py-5 rounded-2xl text-lg"
+              >
+                ◀ LEFT camera
+              </button>
+              <button
+                onClick={() => { setSide("right"); setPhase("ready"); }}
+                className="w-full bg-white active:bg-gray-200 text-black font-bold py-5 rounded-2xl text-lg"
+              >
+                RIGHT camera ▶
+              </button>
+            </div>
+            <p className="text-gray-700 text-xs text-center mt-4">Coordinator controls start and stop</p>
+          </div>
+        </div>
+      )}
+
       {/* Overlay: waiting for coordinator start */}
       {cameraReady && phase === "ready" && (
-        <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-5 px-8 z-20">
+        <div className="absolute inset-0 bg-black/65 flex flex-col items-center justify-center gap-5 px-8 z-20">
           <div className="text-center">
-            <p className="text-xs text-green-500 uppercase tracking-widest font-semibold mb-3">
+            <p className="text-xs text-green-500 uppercase tracking-widest font-semibold mb-4">
               {side?.toUpperCase()} camera · Wide lens
             </p>
             <Loader2 className="text-green-400 animate-spin mx-auto mb-4" size={44} />
             <p className="text-white font-semibold text-lg">Waiting for coordinator</p>
-            <p className="text-gray-500 text-sm mt-2">Mount phone on tripod in wide-lens mode.<br/>The coordinator will start recording.</p>
+            <p className="text-gray-500 text-sm mt-2">Mount on tripod, raise height, lock in place.<br/>Coordinator will start recording.</p>
           </div>
         </div>
       )}
@@ -396,7 +410,7 @@ function RecordPageInner() {
 
       {/* Upload prompt overlay */}
       {showUploadPrompt && (
-        <div className="absolute inset-0 bg-black/92 flex flex-col items-center justify-center gap-6 px-8 z-20">
+        <div className="absolute inset-0 bg-black/92 flex flex-col items-center justify-center gap-6 px-8 z-30">
           <CheckCircle2 size={48} className="text-green-400" />
           <div className="text-center">
             <p className="text-white text-xl font-bold mb-2">Recording complete!</p>
@@ -410,8 +424,8 @@ function RecordPageInner() {
         </div>
       )}
 
-      {/* Side badge */}
-      {!showUploadPrompt && phase !== "recording" && (
+      {/* Side badge — top left when not in a full overlay */}
+      {side && !showUploadPrompt && phase !== "recording" && phase !== "selecting" && (
         <div className="absolute top-4 left-4 z-20">
           <div className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium border bg-black/60 text-gray-400 border-gray-700/50 backdrop-blur-sm">
             <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
