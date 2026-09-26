@@ -166,6 +166,7 @@ function RecordPageInner() {
   const [peerConnected,   setPeerConnected]   = useState(false);
   const [cameraReady,     setCameraReady]     = useState(false);
   const [cameraError,     setCameraError]     = useState<string | null>(null);
+  const [syncStartAt,     setSyncStartAt]     = useState<number | null>(null);
   const [countdownSecs,   setCountdownSecs]   = useState(0);
   const [recordingSecs,   setRecordingSecs]   = useState(0);
   const [uploadProgress,  setUploadProgress]  = useState(0);
@@ -223,10 +224,10 @@ function RecordPageInner() {
   }, [side, id]);
 
   // ── Signal: poll for peer + sync timestamp ────────────────────────────────
+  // Intentionally excludes `phase` from deps so the interval survives phase changes.
   useEffect(() => {
-    if (!side || !id || phase === "selecting") return;
+    if (!side || !id) return;
     let stopped = false;
-    let countdownTimer: ReturnType<typeof setInterval> | null = null;
 
     const tick = async () => {
       if (stopped) return;
@@ -247,44 +248,45 @@ function RecordPageInner() {
           });
         }
 
-        // Both phones: once syncStartAt arrives, start the countdown UI
-        if (s.syncStartAt && phase !== "countdown" && phase !== "recording") {
-          const secsUntil = (s.syncStartAt - Date.now()) / 1000;
-          if (secsUntil > 0) {
-            setPhase("countdown");
-            setCountdownSecs(Math.ceil(secsUntil));
-
-            // Tick the countdown every second
-            if (!countdownTimer) {
-              countdownTimer = setInterval(() => {
-                const remaining = (s.syncStartAt - Date.now()) / 1000;
-                if (remaining <= 0) {
-                  clearInterval(countdownTimer!);
-                  countdownTimer = null;
-                  doStartRecording();
-                } else {
-                  setCountdownSecs(Math.ceil(remaining));
-                }
-              }, 500);
-            }
-          } else {
-            // syncStartAt is in the past — start immediately
-            doStartRecording();
-          }
+        // Lift syncStartAt into state — separate effect drives the countdown
+        if (s.syncStartAt) {
+          setSyncStartAt((prev) => prev ?? s.syncStartAt);
         }
-      } catch { /* network blip, retry next tick */ }
+      } catch { /* network blip */ }
     };
 
     const interval = setInterval(tick, POLL_MS);
     tick();
-
-    return () => {
-      stopped = true;
-      clearInterval(interval);
-      if (countdownTimer) clearInterval(countdownTimer);
-    };
+    return () => { stopped = true; clearInterval(interval); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [side, id, isCoordinator, phase]);
+  }, [side, id, isCoordinator]);
+
+  // ── Countdown: driven by syncStartAt, fully independent of polling ──────────
+  useEffect(() => {
+    if (!syncStartAt) return;
+
+    const secsUntil = (syncStartAt - Date.now()) / 1000;
+    if (secsUntil <= 0) {
+      doStartRecording();
+      return;
+    }
+
+    setPhase("countdown");
+    setCountdownSecs(Math.ceil(secsUntil));
+
+    const timer = setInterval(() => {
+      const remaining = (syncStartAt - Date.now()) / 1000;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        doStartRecording();
+      } else {
+        setCountdownSecs(Math.ceil(remaining));
+      }
+    }, 500);
+
+    return () => clearInterval(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncStartAt]);
 
   // ── Recording ────────────────────────────────────────────────────────────
   const doStartRecording = useCallback(() => {
